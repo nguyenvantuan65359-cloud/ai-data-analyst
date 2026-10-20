@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -41,7 +43,11 @@ public class AnalystAgent {
     private final BusinessRules rules;
     private final AnalysisCards cards;
     private final ToolBudget toolBudget;
+    private final ToolTrace toolTrace;
     private final ObjectMapper om = new ObjectMapper();
+
+    /** 包了追踪器的工具回调：每次工具返回都会记进 ToolTrace，用于"数字出处"校验 */
+    private final ToolCallback[] tracedTools;
 
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AnalystAgent.class);
 
@@ -72,6 +78,13 @@ public class AnalystAgent {
     @Value("${app.analyst.arith-check:true}")
     private boolean arithCheck;
 
+    /**
+     * 数字出处校验的处置方式：
+     * off=不查；warn=只提示不重做（默认，先观察误报率）；blocking=打回重做。
+     */
+    @Value("${app.analyst.grounding:warn}")
+    private String groundingMode;
+
     @Value("${app.analyst.max-agent-steps:8}")
     private int maxSteps;
 
@@ -98,7 +111,8 @@ public class AnalystAgent {
                         DataIngestion ingestion,
                         BusinessRules rules,
                         AnalysisCards cards,
-                        ToolBudget toolBudget) {
+                        ToolBudget toolBudget,
+                        ToolTrace toolTrace) {
         this.chatClient = builder.build();
         this.statsTools = statsTools;
         this.jdbcTool = jdbcTool;
@@ -111,6 +125,13 @@ public class AnalystAgent {
         this.rules = rules;
         this.cards = cards;
         this.toolBudget = toolBudget;
+        this.toolTrace = toolTrace;
+        ToolCallback[] raw = MethodToolCallbackProvider.builder()
+                .toolObjects(statsTools, jdbcTool).build().getToolCallbacks();
+        this.tracedTools = new ToolCallback[raw.length];
+        for (int i = 0; i < raw.length; i++) {
+            this.tracedTools[i] = new TracingToolCallback(raw[i], toolTrace);
+        }
     }
 
     /** 多轮分析：sessionId 相同的请求共享对话记忆；同时也按 sid 隔离当前表与 uploaded_data */
@@ -125,12 +146,14 @@ public class AnalystAgent {
 
         AnalystResult result;
         toolBudget.begin(maxToolCalls);
+        toolTrace.begin();
         try {
             result = planning
                     ? plannedAnalysis(question, sessionId, sid)
                     : singleShot(question, sessionId, sid, null, null);
         } finally {
             toolBudget.end();   // ThreadLocal 必须清，否则下一个请求会继承上次的计数
+            toolTrace.end();
         }
 
         // 2) 落缓存 + 3) 沉淀为分析卡片（只要真有答案）
@@ -174,6 +197,12 @@ public class AnalystAgent {
                 found.addAll(ArithCheck.check(r.answer()));
             }
             // 最后一轮不再复核：已经没有重做的机会，多花一次调用没意义
+            // 数字出处：每个数字都要能追到工具输出/图表数据/数据画像
+            if (!"off".equalsIgnoreCase(groundingMode)) {
+                List<String> g = GroundingCheck.check(r.answer(), toolTrace.text());
+                if ("blocking".equalsIgnoreCase(groundingMode)) found.addAll(g);
+                else suggestions.addAll(g);
+            }
             if (verifier && round < maxReplans) {
                 Critique c = verify(question, plan, r);
                 found.addAll(c.blocking());
@@ -195,6 +224,8 @@ public class AnalystAgent {
             out = appendNote(out, "\n\n---\n**自检提示**：以下问题在重做后仍未完全解决，请谨慎采信结论：\n- "
                     + String.join("\n- ", issues));
         }
+        log.info("数字出处素材 session={} 共 {} 字符，用到工具 {} 个：{}", sid,
+                toolTrace.text().length(), toolTrace.toolsUsed().size(), toolTrace.toolsUsed());
         if (!suggestions.isEmpty()) {
             out = appendNote(out, "\n\n**方法学补充（不影响结论方向，未重做）**：\n- "
                     + String.join("\n- ", suggestions));
@@ -231,6 +262,7 @@ public class AnalystAgent {
             sys.append("\n\n─────────── 上一轮被打回的原因（必须逐条解决）───────────\n").append(feedback);
         }
 
+        toolTrace.recordProfile(profile);
         String raw = call(sys.toString(), question, sessionId, sid, true);
         return parse(raw, sessionId);
     }
@@ -243,7 +275,7 @@ public class AnalystAgent {
         ChatMemory memory = sessions.get(sessionId);
         try {
             ChatClient.ChatClientRequestSpec spec = chatClient.prompt().system(system).user(user);
-            if (withTools) spec = spec.toolContext(Map.of("sessionId", sid)).tools(statsTools, jdbcTool);
+            if (withTools) spec = spec.toolContext(Map.of("sessionId", sid)).tools(tracedTools);
             // 关键：必须显式把会话ID塞进 advisor 上下文，否则所有会话都写进默认会话，多轮就串了
             return spec.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, sessionId)
                             .advisors(MessageChatMemoryAdvisor.builder(memory).build()))
@@ -251,7 +283,7 @@ public class AnalystAgent {
         } catch (Exception e) {
             log.warn("带记忆调用失败，降级单轮：{}", e.toString());
             ChatClient.ChatClientRequestSpec spec = chatClient.prompt().system(system).user(user);
-            if (withTools) spec = spec.toolContext(Map.of("sessionId", sid)).tools(statsTools, jdbcTool);
+            if (withTools) spec = spec.toolContext(Map.of("sessionId", sid)).tools(tracedTools);
             return spec.call().content();
         }
     }
@@ -656,6 +688,8 @@ public class AnalystAgent {
                 Map<String, Object> item = cs.toMap();
                 item.put("data", data);
                 charts.add(item);
+                // 图表取数不走工具，单独记一笔，否则这些数字会被"出处校验"误判为编造
+                toolTrace.recordChart(String.valueOf(cs.title), rows);
             } catch (SecurityException | IllegalArgumentException e) {
                 problems.add("一张图被只读闸门拒绝：" + e.getMessage());
             } catch (Exception e) {

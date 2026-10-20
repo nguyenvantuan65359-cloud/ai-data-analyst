@@ -69,6 +69,9 @@ app:
     verifier: true
     # 算术复算：差值/百分比能否用正文出现的数字复现，复现不出就打回重做
     arith-check: true
+    # 数字出处校验：每个数字要能追到工具输出/图表数据/数据画像
+    # off=不查，warn=只提示（默认，先观察误报率），blocking=打回重做
+    grounding: warn
     # 【已废弃】这个配置曾经只声明不使用，现有真实上限见 max-tool-calls
     max-agent-steps: 8
     # 文件上传落盘目录

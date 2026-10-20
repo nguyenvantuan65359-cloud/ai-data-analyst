@@ -22,9 +22,18 @@ import java.util.regex.Pattern;
  */
 public final class ArithCheck {
 
-    /** 差值断言：动词紧跟数字，如"多 18,002 元""低了 3.2 个百分点" */
+    /**
+     * 差值断言：动词紧跟数字，如"多 18,002 元"。
+     * 后面若跟 % / 个百分点 / 倍，那是比值不是差值，不算差值断言（否则"高约 12.4%"会被当成"高了 12.4 元"）。
+     */
     private static final Pattern DELTA = Pattern.compile(
-            "(?:多|少了?|高出?|低了?|领先|落后|增加|减少|增长|下降)了?\\s*(?:约)?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)");
+            "(?:多|少了?|高出?|低了?|领先|落后|增加|减少|增长|下降)了?\\s*(?:约)?\\s*"
+            // (?![0-9.,]) 防止正则回退成前缀匹配：否则 "12.4%" 整体匹配失败后会退一步匹配成 "12"，
+            // 此时后面是 "."，% 那条断言就被绕过去了（实测踩过）
+            + "([0-9][0-9,]*(?:\\.[0-9]+)?)(?![0-9.,])(?!\\s*(?:%|％|个百分点|倍|pp))");
+
+    /** 百分比断言的语境：必须真的在比较（"占比""比例"里的"比"不算） */
+    private static final Pattern COMPARE_CTX = Pattern.compile("比[^。；]{0,14}(?:高|低|多|少|增长|下降|提升|回落)");
 
     /** 百分比断言 */
     private static final Pattern PERCENT = Pattern.compile("([0-9]+(?:\\.[0-9]+)?)\\s*%");
@@ -60,7 +69,7 @@ public final class ArithCheck {
 
         // ---- 2) 百分比断言（只在"比/较/相对"语境里查） ----
         for (String sent : sentences(answer)) {
-            if (!sent.contains("比") && !sent.contains("较") && !sent.contains("相对")) continue;
+            if (!COMPARE_CTX.matcher(sent).find()) continue;
             Matcher p = PERCENT.matcher(sent);
             while (p.find()) {
                 double claimed = parse(p.group(1));
