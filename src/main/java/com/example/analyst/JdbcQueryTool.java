@@ -18,12 +18,15 @@ public class JdbcQueryTool {
     private final SqlGuard guard;
     private final AnalysisSession session;
     private final ExternalDb externalDb;
+    private final ToolBudget budget;
 
-    public JdbcQueryTool(DataIngestion ingestion, SqlGuard guard, AnalysisSession session, ExternalDb externalDb) {
+    public JdbcQueryTool(DataIngestion ingestion, SqlGuard guard, AnalysisSession session,
+                         ExternalDb externalDb, ToolBudget budget) {
         this.ingestion = ingestion;
         this.guard = guard;
         this.session = session;
         this.externalDb = externalDb;
+        this.budget = budget;
     }
 
     @Tool(description = "用 JDBC 对数据库执行一条只读 SELECT 查询，返回结果摘要（列名、行数、前若干行）。只能查询，不能增删改。" +
@@ -69,6 +72,8 @@ public class JdbcQueryTool {
 
     /** 从 Spring AI 注入的工具上下文里取会话 ID */
     private String sid(ToolContext ctx) {
+        // 查库工具同样计入本次预算
+        budget.guard("queryDatabase/listTables");
         Object v = (ctx == null || ctx.getContext() == null) ? null : ctx.getContext().get("sessionId");
         return v == null ? null : String.valueOf(v);
     }

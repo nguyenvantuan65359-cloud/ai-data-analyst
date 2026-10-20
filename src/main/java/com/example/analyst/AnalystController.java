@@ -245,6 +245,8 @@ public class AnalystController {
         // 前端据此在答案上方挂一条醒目提示，避免"以为在分析自己文件，其实在分析示例库"。
         m.put("dataReady", session.hasPinned(sid));
         m.put("source", session.sourceName(sid));
+        m.put("plan", r.plan());          // 这次的分析计划（自主规划模式）
+        m.put("attempts", r.attempts());  // 执行了几轮，>1 说明被自检打回过
         return m;
     }
 

@@ -38,9 +38,11 @@ import java.util.TreeMap;
 public class StatsTools {
 
     private final AnalysisSession session;
+    private final ToolBudget budget;
 
-    public StatsTools(AnalysisSession session) {
+    public StatsTools(AnalysisSession session, ToolBudget budget) {
         this.session = session;
+        this.budget = budget;
     }
 
     // ==================== 描述统计（含数据质量与分布形态）====================
@@ -346,6 +348,9 @@ public class StatsTools {
      * 必须用 resolve：用户上传的文件是 pinned，AI 的探索性查询不能顶掉它。
      */
     private DataTable require(ToolContext ctx) {
+        // 所有统计工具的第一道关：先扣一次工具调用预算（超了直接抛，让模型收尾）。
+        // 放在这里而不是每个方法开头，是因为 10 个工具都必经这个方法。
+        budget.guard("统计工具");
         String sid = (ctx == null || ctx.getContext() == null) ? null : (String) ctx.getContext().get("sessionId");
         DataTable t = session.resolve(sid);
         if (t == null) throw new IllegalStateException("当前会话还没有数据表，请先用 queryDatabase 取数或上传文件");

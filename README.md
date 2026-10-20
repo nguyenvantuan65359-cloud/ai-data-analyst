@@ -31,6 +31,7 @@
 | 业务口径规则 | 一份可编辑的 `business_rules.md`，每次问答强制注入（比如「活动只算进行中+报名成功待开始」） |
 | 分析卡片 | 每次问答沉淀成 JSON，做月度复盘时可以翻回去复用 |
 | 访问口令 | `/api/**` 校验 `X-Access-Code`，分享链接带 `?code=` 即可进入 |
+| 自主规划 | 规划 → 执行 → 自检 → 带问题重做；工具调用有硬上限，超了强制收尾并在「局限」里列出没查的东西 |
 
 ---
 
@@ -54,7 +55,13 @@
 6. **缓存只由用户动作失效**
    原来把"当前表指纹"算进 cache key，AI 换个表指纹就漂移，缓存永不命中。现在只在上传 / 手写 SQL / 连库断库时 `invalidate(sid)`。
 
-7. **失败要说人话**
+7. **自主规划不是"多想几轮"，而是"先立验收标准"**
+   一次问答拆成四段：Planner 只出计划不查数（`deepseek-chat`，秒级）→ Executor 照计划带工具执行
+   → SelfCheck 用正则查硬伤（缺段落、说"显著"却无 p 值）→ Verifier 用模型挑刺（数字自相矛盾、
+   方法与数据不匹配、断言超出证据）。问题具体到"26% 应为 14.6%"，才让它重做；只说"重做"模型只会换个说法。
+   约束三条：`max-replans` 限轮数、`max-tool-calls` 做在工具入口上、预算耗尽后强制无工具收尾。
+
+8. **失败要说人话**
    前端统一 `readJson()`：响应不是 JSON（隧道 502 / 后端异常页）就翻译成「服务暂时不可用」；网关类错误自动重试一次，业务错误不重试（不重复计费）。
 
 ---
@@ -109,6 +116,11 @@ bash tunnel.sh --restart    # 地址变了就重起（机器重启后）
 | `profile-max-chars` | 12000 | 注入提示词的字典长度上限 |
 | `profile-max-tables` | 20 | 建字典时最多收录多少张表 |
 | `access-code` | 空 | 共享访问口令，空=不校验 |
+| `planning` | true | 自主规划开关，关掉退回单轮工具调用 |
+| `max-replans` | 1 | 被自检打回后最多重做几次 |
+| `max-tool-calls` | 12 | 单次问答的工具调用上限（超了强制收尾） |
+| `plan-model` | deepseek-chat | 规划/复核用的快模型 |
+| `verifier` | true | 是否让模型复核挑刺（关掉只留代码级自检） |
 
 ---
 
@@ -128,6 +140,9 @@ src/main/java/com/example/analyst/
   DbProfile.java            数据字典（记忆文件）
   BusinessRules.java        业务口径规则
   AnalysisCards.java        分析卡片沉淀
+  AnalysisPlan.java         执行计划（目标/步骤/验收标准）
+  ToolBudget.java           单次问答的工具调用预算（ThreadLocal）
+  SelfCheck.java            代码级自检（不调模型）
   ExternalDb.java           外部数据源
 src/main/resources/static/index.html   单页前端（ECharts）
 ```
@@ -139,6 +154,8 @@ src/main/resources/static/index.html   单页前端（ECharts）
 - 单进程内存态：多副本部署需要把 `AnalysisSession` / 缓存换成 Redis。
 - 免费隧道域名不固定，机器重启后链接会变；要固定域名需用自己的域名做 Cloudflare named tunnel。
 - 大表保护是"取回行数封顶"，不是下推计算——超大表建议先在库里聚合。
+- 自主规划会把单问延迟从 30~60 秒拉到 1~2 分钟、token 约 2~3 倍；简单聚合问题可关掉 `planning`。
+- 复核是模型判断，不是形式化证明；数字层面的硬校验（正则比对工具输出）尚未实现。
 - 统计工具覆盖的是常见方法（t/ANOVA/相关/回归/卡方/时间序列），没有做生存分析、混合模型、因果推断。
 
 ---

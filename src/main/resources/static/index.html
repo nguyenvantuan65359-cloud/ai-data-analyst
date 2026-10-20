@@ -493,6 +493,13 @@
              +  '<div class="chartbox"></div>'
              +  '<details class="sqlbox"><summary>数据口径 · ' + total + ' 行' + trunc + '</summary><code>' + esc(c.sql || '') + '</code></details>';
       });
+      // 自主规划模式：把"它打算怎么干""被自检打回几次"摊开给用户看
+      if (Array.isArray(j.plan) && j.plan.length) {
+        const rounds = j.attempts || 1;
+        html += '<details class="sqlbox"><summary>分析计划 · 执行 ' + rounds + ' 轮'
+             + (rounds > 1 ? '（被自检打回后重做）' : '') + '</summary>'
+             + j.plan.map(x => '<div>' + esc(x) + '</div>').join('') + '</details>';
+      }
       html += '</div>';
       pending.innerHTML = html;
 

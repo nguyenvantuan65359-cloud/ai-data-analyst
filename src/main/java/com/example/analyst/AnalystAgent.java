@@ -40,7 +40,33 @@ public class AnalystAgent {
     private final DataIngestion ingestion;
     private final BusinessRules rules;
     private final AnalysisCards cards;
+    private final ToolBudget toolBudget;
     private final ObjectMapper om = new ObjectMapper();
+
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AnalystAgent.class);
+
+    /**
+     * 自主规划开关：开=规划→执行→自检→（带问题）重做；关=老的单轮工具调用。
+     * 关掉是有用的：reasoner 很慢，赶时间或只问一个简单聚合时，多一轮规划纯属浪费。
+     */
+    @Value("${app.analyst.planning:true}")
+    private boolean planning;
+
+    /** 最多重做几次（不含首次执行）：1 表示总共最多执行 2 轮 */
+    @Value("${app.analyst.max-replans:1}")
+    private int maxReplans;
+
+    /** 单次问答允许的工具调用次数（做在工具入口上，超了强制收尾） */
+    @Value("${app.analyst.max-tool-calls:12}")
+    private int maxToolCalls;
+
+    /** 规划与复核用的快模型：这两步不需要深度推理，用 reasoner 纯等 */
+    @Value("${app.analyst.plan-model:deepseek-chat}")
+    private String planModel;
+
+    /** 是否启用模型复核（挑刺）。关掉只保留代码级自检 */
+    @Value("${app.analyst.verifier:true}")
+    private boolean verifier;
 
     @Value("${app.analyst.max-agent-steps:8}")
     private int maxSteps;
@@ -67,7 +93,8 @@ public class AnalystAgent {
                         SqlGuard guard,
                         DataIngestion ingestion,
                         BusinessRules rules,
-                        AnalysisCards cards) {
+                        AnalysisCards cards,
+                        ToolBudget toolBudget) {
         this.chatClient = builder.build();
         this.statsTools = statsTools;
         this.jdbcTool = jdbcTool;
@@ -79,6 +106,7 @@ public class AnalystAgent {
         this.ingestion = ingestion;
         this.rules = rules;
         this.cards = cards;
+        this.toolBudget = toolBudget;
     }
 
     /** 多轮分析：sessionId 相同的请求共享对话记忆；同时也按 sid 隔离当前表与 uploaded_data */
@@ -91,38 +119,15 @@ public class AnalystAgent {
             return hit.getKey().withCached(true);
         }
 
-        DataTable t = session.get(sessionId);
-        // 不再因"session 没数据"拦截提问：本地示例表恒可查，连了外部库时
-        // AI 靠 listTables/queryDatabase + 数据字典自主探索，用户可以直接问库的问题
-        String system = buildSystem(t == null
-                ? "（当前没有内存数据集。请先用 listTables 工具查看有哪些可查的表，再用 queryDatabase 取数。）"
-                : profiler.profile(t), sessionId);
-        ChatMemory memory = sessions.get(sessionId);
-
-        String raw;
+        AnalystResult result;
+        toolBudget.begin(maxToolCalls);
         try {
-            raw = chatClient.prompt()
-                    .system(system)
-                    .user(question)
-                    // 关键：必须显式把会话ID塞进 advisor 上下文，否则所有会话都写进默认会话，多轮就串了
-                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, sessionId)
-                                    .advisors(MessageChatMemoryAdvisor.builder(memory).build()))
-                    // 工具层也要知道会话 ID：统计分析工具与查库工具必须读写本会话的表，不能落到 default
-                    .toolContext(Map.of("sessionId", sid))
-                    .tools(statsTools, jdbcTool)
-                    .call()
-                    .content();
-        } catch (Exception e) {
-            // 多轮记忆与部分模型的历史消息格式可能冲突，失败时降级为单轮，保证可用
-            raw = chatClient.prompt()
-                    .system(system)
-                    .user(question)
-                    .toolContext(Map.of("sessionId", sid))
-                    .tools(statsTools, jdbcTool)
-                    .call()
-                    .content();
+            result = planning
+                    ? plannedAnalysis(question, sessionId, sid)
+                    : singleShot(question, sessionId, sid, null, null);
+        } finally {
+            toolBudget.end();   // ThreadLocal 必须清，否则下一个请求会继承上次的计数
         }
-        AnalystResult result = parse(raw, sessionId);
 
         // 2) 落缓存 + 3) 沉淀为分析卡片（只要真有答案）
         cache.put(cacheKey, new java.util.AbstractMap.SimpleEntry<>(result, System.currentTimeMillis()));
@@ -130,6 +135,250 @@ public class AnalystAgent {
             cards.save(sessionId, question, result.answer(), result.charts());
         }
         return result;
+    }
+
+    /**
+     * 自主规划主循环：规划 → 执行 → 自检 → 带着具体问题重做。
+     *
+     * 三个关键约束（缺一个这套东西就会失控）：
+     * 1. 轮数上限 maxReplans，不是"直到满意为止"；
+     * 2. 工具调用次数上限做在 ToolBudget 上，超了强制无工具收尾；
+     * 3. 自检必须给出**具体哪条不对**，只说"重做"模型只会换个说法糊过去。
+     */
+    private AnalystResult plannedAnalysis(String question, String sessionId, String sid) {
+        AnalysisPlan plan = makePlan(question, sessionId);
+        log.info("规划 session={} 步数={}：{}", sid,
+                plan.steps() == null ? 0 : plan.steps().size(), plan.render().replace('\n', ' '));
+
+        AnalystResult best = null;
+        List<String> issues = List.of();
+        int attempts = 0;
+
+        for (int round = 0; round <= maxReplans; round++) {
+            attempts++;
+            // 预算耗尽就不带工具了，否则每一轮都只会再撞一次上限
+            AnalystResult r = toolBudget.exhausted()
+                    ? singleShot(question, sessionId, sid,
+                        "工具预算已用完，请仅凭已取得的结果作答。" + renderIssues(issues), null)
+                    : singleShot(question, sessionId, sid, renderIssues(issues), plan);
+            best = r;
+
+            List<String> found = new java.util.ArrayList<>(SelfCheck.check(r));
+            // 最后一轮不再复核：已经没有重做的机会，多花一次调用没意义
+            if (verifier && round < maxReplans) {
+                found.addAll(verify(question, plan, r));
+            }
+            if (found.isEmpty()) {
+                issues = List.of();
+                break;
+            }
+            issues = found;
+            log.info("自检第 {} 轮未通过 session={}：{}", attempts, sid, found);
+        }
+
+        AnalystResult out = best == null
+                ? AnalystResult.textOnly("分析没有产出结果，请重试或换一种问法。")
+                : best.withPlan(plan.lines(), attempts);
+
+        if (!issues.isEmpty()) {
+            out = appendNote(out, "\n\n---\n**自检提示**：以下问题在重做后仍未完全解决，请谨慎采信结论：\n- "
+                    + String.join("\n- ", issues));
+        }
+        return out;
+    }
+
+    private static String renderIssues(List<String> issues) {
+        if (issues == null || issues.isEmpty()) return null;
+        return "上一轮自检发现这些问题，必须先修正再作答：\n- " + String.join("\n- ", issues);
+    }
+
+    private AnalystResult appendNote(AnalystResult r, String note) {
+        return new AnalystResult((r.answer() == null ? "" : r.answer()) + note,
+                r.chart(), r.chartData(), r.charts(), r.cached(), r.plan(), r.attempts());
+    }
+
+    /** 单轮执行：拼系统提示词（含计划与被退回的原因）→ 带工具调模型 → 解析图表 */
+    private AnalystResult singleShot(String question, String sessionId, String sid,
+                                     String feedback, AnalysisPlan plan) {
+        DataTable t = session.get(sessionId);
+        String profile = t == null
+                ? "（当前没有内存数据集。请先用 listTables 工具查看有哪些可查的表，再用 queryDatabase 取数。）"
+                : profiler.profile(t);
+
+        StringBuilder sys = new StringBuilder(buildSystem(profile, sessionId));
+        if (plan != null) {
+            sys.append("\n\n─────────── 本次分析计划（先照这个走）───────────\n")
+               .append(plan.render())
+               .append("\n执行中若发现某步前提不成立（比如缺列、样本不足），可以跳过并在「局限与提醒」里写清原因，")
+               .append("但不要悄悄换个问题去答。");
+        }
+        if (feedback != null && !feedback.isBlank()) {
+            sys.append("\n\n─────────── 上一轮被打回的原因（必须逐条解决）───────────\n").append(feedback);
+        }
+
+        String raw = call(sys.toString(), question, sessionId, sid, true);
+        return parse(raw, sessionId);
+    }
+
+    /**
+     * 带工具/带记忆的一次调用；异常时降级为单轮（部分模型的历史消息格式与 advisor 冲突）。
+     * 工具调用次数由 ToolBudget 在工具入口兜底，这里不重复计数。
+     */
+    private String call(String system, String user, String sessionId, String sid, boolean withTools) {
+        ChatMemory memory = sessions.get(sessionId);
+        try {
+            ChatClient.ChatClientRequestSpec spec = chatClient.prompt().system(system).user(user);
+            if (withTools) spec = spec.toolContext(Map.of("sessionId", sid)).tools(statsTools, jdbcTool);
+            // 关键：必须显式把会话ID塞进 advisor 上下文，否则所有会话都写进默认会话，多轮就串了
+            return spec.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, sessionId)
+                            .advisors(MessageChatMemoryAdvisor.builder(memory).build()))
+                    .call().content();
+        } catch (Exception e) {
+            log.warn("带记忆调用失败，降级单轮：{}", e.toString());
+            ChatClient.ChatClientRequestSpec spec = chatClient.prompt().system(system).user(user);
+            if (withTools) spec = spec.toolContext(Map.of("sessionId", sid)).tools(statsTools, jdbcTool);
+            return spec.call().content();
+        }
+    }
+
+    /** 快模型调用（规划/复核用）：不挂工具、不挂记忆，温度 0 求稳定 */
+    private String callCheap(String system, String user) {
+        try {
+            return chatClient.prompt().system(system).user(user)
+                    // Spring AI 2.0 的 options 接的是 Builder，不是 Options 实例
+                    .options(org.springframework.ai.openai.OpenAiChatOptions.builder()
+                            .model(planModel).temperature(0.0))
+                    .call().content();
+        } catch (Exception e) {
+            log.warn("快模型（{}）调用失败，退回主模型：{}", planModel, e.toString());
+            return chatClient.prompt().system(system).user(user).call().content();
+        }
+    }
+
+    /** 第一步：把问题拆成可执行、可验收的步骤（只出计划，不许查数） */
+    private AnalysisPlan makePlan(String question, String sessionId) {
+        DataTable t = session.get(sessionId);
+        String profile = t == null ? "（本会话还没有数据表）" : profiler.profile(t);
+
+        String system = """
+                你是数据分析任务的规划师。你的唯一产出是**执行计划**，不是答案，也不要写 SQL。
+
+                要求：
+                1. 先判断问题属于哪一类：描述分布 / 两组比较 / 多组比较 / 相关与回归 / 构成与集中度 / 时间趋势 / 数据质量盘点；
+                2. 拆成 1~5 步，每步都要能独立验收（做完能判断"这步成了没有"）；
+                3. 每步写明：task（做什么）、method（用哪个统计方法或取数方式）、expects（预期拿到什么）；
+                4. 第 1 步通常是"确认可用列与数据质量"，最后一步通常是"给出结论与边界"；
+                5. 只能基于给出的真实列名规划，**列不存在就不要规划依赖它的步骤**；
+                6. 输出严格 JSON，不要 markdown 代码块，不要解释文字。
+
+                JSON 结构：
+                {"goal":"一句话目标","steps":[{"id":1,"task":"...","method":"...","expects":"..."}],"acceptance":"什么算完成"}
+
+                可用方法（工具）：describe 描述统计、tTest 两组均值、anova 多组均值、correlation Pearson、
+                spearman 秩相关、regression 回归、chiSquare 卡方、pareto 帕累托、abc ABC 分类、timeSeries 时间序列、
+                queryDatabase 只读 SQL 取数、listTables 列出可用表。
+                """;
+
+        String user = "用户问题：" + question + "\n\n当前数据表画像：\n" + profile
+                + (rules.configured() ? "\n\n业务口径规则（必须体现在计划里）：\n" + rules.current() : "");
+
+        try {
+            String json = callCheap(system, user);
+            return parsePlan(json, question);
+        } catch (Exception e) {
+            log.warn("规划失败，退化为单步计划：{}", e.toString());
+            return AnalysisPlan.fallback(question);
+        }
+    }
+
+    private AnalysisPlan parsePlan(String raw, String question) {
+        String json = extractJson(raw);
+        if (json == null) return AnalysisPlan.fallback(question);
+        try {
+            com.fasterxml.jackson.databind.JsonNode n = om.readTree(json);
+            String goal = n.path("goal").asText(question);
+            String acceptance = n.path("acceptance").asText("");
+            List<AnalysisPlan.Step> steps = new java.util.ArrayList<>();
+            for (com.fasterxml.jackson.databind.JsonNode s : n.path("steps")) {
+                steps.add(new AnalysisPlan.Step(
+                        s.path("id").asInt(steps.size() + 1),
+                        s.path("task").asText(""),
+                        s.path("method").asText(""),
+                        s.path("expects").asText("")));
+            }
+            if (steps.isEmpty()) return AnalysisPlan.fallback(question);
+            return new AnalysisPlan(goal, steps, acceptance);
+        } catch (Exception e) {
+            return AnalysisPlan.fallback(question);
+        }
+    }
+
+    /** 第二步之后：复核员挑刺。只报真问题，宁可少报也不要凑数——凑数会让重做变成瞎改 */
+    private List<String> verify(String question, AnalysisPlan plan, AnalystResult r) {
+        String charts = "（无图）";
+        if (r.charts() != null && !r.charts().isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            for (Map<String, Object> c : r.charts()) {
+                sb.append("- ").append(c.get("type")).append("｜").append(c.get("title"))
+                  .append("｜SQL: ").append(c.get("sql")).append("\n");
+            }
+            charts = sb.toString();
+        }
+        String system = """
+                你是最挑剔的数据分析复核员。你要检查下面这份分析是否站得住，只报**真实存在**的问题。
+
+                检查项（按这个顺序看，没有问题就跳过）：
+                1. 数字自相矛盾：前后两个数字对不上，或分组之和与总数不符；
+                2. 方法与数据不匹配：用 t 检验比三组以上、样本 n<3 还讲显著性、对类别列做回归等；
+                3. 断言超出证据：把相关说成因果、把描述性排名说成"显著更高"、给出数据里根本没有的字段；
+                4. 口径缺失：没交代筛选条件、样本量、缺失值处理方式，导致结论无法复现。
+
+                输出严格 JSON，不要代码块：{"issues":["具体指出哪里不对、应该改成什么"]}
+                没有任何问题时输出 {"issues":[]}。**不要提出措辞、排版、语气类的意见，那不是问题。**
+                """;
+        String user = "用户问题：" + question
+                + "\n\n原计划：\n" + plan.render()
+                + "\n\n分析正文：\n" + (r.answer() == null ? "" : r.answer())
+                + "\n\n图表与取数 SQL：\n" + charts;
+
+        try {
+            String json = extractJson(callCheap(system, user));
+            if (json == null) return List.of();
+            com.fasterxml.jackson.databind.JsonNode n = om.readTree(json);
+            List<String> out = new java.util.ArrayList<>();
+            for (com.fasterxml.jackson.databind.JsonNode i : n.path("issues")) {
+                String s = i.asText("");
+                if (!s.isBlank()) out.add(s);
+            }
+            return out.size() > 4 ? out.subList(0, 4) : out;
+        } catch (Exception e) {
+            log.warn("复核调用失败，跳过本轮复核：{}", e.toString());
+            return List.of();
+        }
+    }
+
+    /** 从模型输出里抠出第一个 JSON 对象（模型常加 ```json 或前后废话） */
+    private static String extractJson(String raw) {
+        if (raw == null) return null;
+        int b = raw.indexOf('{');
+        if (b < 0) return null;
+        int depth = 0;
+        boolean inStr = false;
+        for (int i = b; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (inStr) {
+                if (c == '\\') { i++; continue; }
+                if (c == '"') inStr = false;
+                continue;
+            }
+            if (c == '"') { inStr = true; continue; }
+            if (c == '{') depth++;
+            else if (c == '}') {
+                depth--;
+                if (depth == 0) return raw.substring(b, i + 1);
+            }
+        }
+        return null;
     }
 
     /**
@@ -314,7 +563,7 @@ public class AnalystAgent {
             }
         }
         String answer = text.replaceAll("(?i)```chart[\\s\\S]*?```", "").trim();
-        if (jsons.isEmpty()) return new AnalystResult(answer, null, null, List.of(), false);
+        if (jsons.isEmpty()) return new AnalystResult(answer, null, null, List.of(), false, List.of(), 0);
 
         List<Map<String, Object>> charts = new ArrayList<>();
         List<String> problems = new ArrayList<>();
@@ -349,13 +598,13 @@ public class AnalystAgent {
 
         if (charts.isEmpty()) {
             String tail = problems.isEmpty() ? "" : "\n\n（" + String.join("；", problems) + "）";
-            return new AnalystResult(answer + tail, null, null, List.of(), false);
+            return new AnalystResult(answer + tail, null, null, List.of(), false, List.of(), 0);
         }
         @SuppressWarnings("unchecked")
         Map<String, Object> firstData = (Map<String, Object>) charts.get(0).get("data");
         String tail = problems.isEmpty() ? ""
                 : "\n\n（其余 " + problems.size() + " 张图未生成：" + String.join("；", problems) + "）";
-        return new AnalystResult(answer + tail, charts.get(0), firstData, charts, false);
+        return new AnalystResult(answer + tail, charts.get(0), firstData, charts, false, List.of(), 0);
     }
 
     /** 一个代码块里可能有多个 JSON 对象（LLM 偶尔会塞在一起），按顶层 {} 逐个切出来 */

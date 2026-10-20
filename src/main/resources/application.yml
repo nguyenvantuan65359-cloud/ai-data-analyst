@@ -56,7 +56,18 @@ spring:
 
 app:
   analyst:
-    # agent 最大循环步数，防止模型无限绕圈烧 token
+    # 自主规划模式：规划 → 执行 → 自检 →（带问题）重做
+    # 关掉则退回单轮工具调用（更快更省，但不会自我校验）
+    planning: true
+    # 最多重做几次（不含首次执行）
+    max-replans: 1
+    # 单次问答允许的工具调用次数（做在工具入口上，超了强制无工具收尾）
+    max-tool-calls: 12
+    # 规划/复核用的快模型：这两步不需要深度推理
+    plan-model: deepseek-chat
+    # 是否让模型复核（挑刺）；关掉只保留代码级自检
+    verifier: true
+    # 【已废弃】这个配置曾经只声明不使用，现有真实上限见 max-tool-calls
     max-agent-steps: 8
     # 文件上传落盘目录
     upload-dir: ./uploads
