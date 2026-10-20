@@ -1,0 +1,36 @@
+# ---- 密钥与本地配置（绝不能提交）----
+.env
+cp.txt
+
+# ---- 构建产物 ----
+target/
+build/
+*.class
+
+# ---- 运行时数据（落盘 H2、上传缓存、分析卡片、数据字典）----
+data/
+uploads/
+analysis_cards/
+db_profile.md
+business_rules.md
+
+# ---- 日志与调试输出 ----
+*.log
+logs/
+nohup.out
+
+# ---- 演示/测试过程中产生的临时请求体 ----
+_*.json
+_*.txt
+rfam3.json
+
+# ---- 编辑器与系统 ----
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- 内部分享文档（含访问口令与线上链接，不进仓库）----
+DEPLOY_SHARE.md
+.workbuddy/

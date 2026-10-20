@@ -1,0 +1,83 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: analyst-demo
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 20MB
+  # 默认 H2 内存库：保证启动无需外部数据库。要连真实库，改这四项并确认 pom 里对应驱动已加：
+  #   MySQL      -> jdbc:mysql://host:3306/db      + com.mysql.cj.jdbc.Driver             + mysql-connector-j（已加）
+  #   PostgreSQL -> jdbc:postgresql://host:5432/db + org.postgresql.Driver               + postgresql（已加）
+  #   SQL Server -> jdbc:sqlserver://host:1433;databaseName=db + com.microsoft.sqlserver.jdbc.SQLServerDriver + mssql-jdbc（已加）
+  datasource:
+    # 落盘库（不再是内存库）：服务重启 / 机器重启后，用户上传的表还在，会话能被找回来。
+    # 代价是 ./data 下会留一个 H2 文件；想清空就停服务删掉它。
+    url: jdbc:h2:file:./data/analyst;DB_CLOSE_DELAY=-1;MODE=MySQL
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  # 启动时自动执行 schema.sql / data.sql（建表 + 灌入示例销售数据），让 AI 查库立即可用
+  sql:
+    init:
+      mode: always
+  ai:
+    model:
+      chat: openai
+      embedding: openai
+    openai:
+      # 顶层兜底凭据，供未单独配置的子模型使用（下方 chat/embedding 已各自指定）
+      api-key: ${DEEPSEEK_API_KEY}
+      # 数据分析专家主用推理版，统计推导更稳
+      chat:
+        base-url: https://api.deepseek.com
+        api-key: ${DEEPSEEK_API_KEY}
+        options:
+          model: deepseek-reasoner
+          temperature: 0.2
+      # RAG 备用：向量化端点（本系统未启用 RAG 也可保留）
+      embedding:
+        base-url: https://api.deepseek.com/v1
+        api-key: ${DEEPSEEK_API_KEY}
+        options:
+          model: deepseek-embedding
+      # 只启用本系统用到的 chat + embedding；其余 OpenAI 模型自动配置关闭，避免缺凭据导致启动失败
+      audio:
+        speech:
+          enabled: false
+        transcription:
+          enabled: false
+      image:
+        enabled: false
+      moderation:
+        enabled: false
+
+app:
+  analyst:
+    # agent 最大循环步数，防止模型无限绕圈烧 token
+    max-agent-steps: 8
+    # 文件上传落盘目录
+    upload-dir: ./uploads
+    # 数据字典（记忆文件）落盘路径：连接数据库后自动内省表结构并写入
+    profile-file: ./db_profile.md
+    # 注入系统提示词的字典最大字符数，防止超长
+    profile-max-chars: 12000
+    # 单次建字典最多收录多少张表：大型库全量 COUNT(*) 会极慢，超出只对前 N 张建字典
+    profile-max-tables: 20
+    # 每个会话保留的历史消息条数（多轮对话记忆窗口）
+    chat-memory-messages: 20
+    # 一次回答最多出几张图（多图能讲清一个问题时才多出）
+    max-charts: 4
+    # 单次查询最多取回多少行：防止一条 SELECT * 把整张千万行大表拖进 JVM 内存
+    max-query-rows: 200000
+    # 问答结果缓存有效期（分钟）：同问题+同数据态直接复用，省 token 也保证短期可复现
+    cache-ttl-minutes: 10
+    # 业务口径规则文件：人工维护的"哪些数据算进来"，每次问答强制注入提示词
+    rules-file: ./business_rules.md
+    # 分析卡片落盘目录：每次问答沉淀成「问题+SQL+图表+结论」，做月度复盘时可复用
+    cards-dir: ./analysis_cards
+    # 共享访问口令：留空=不校验（自用）。对外分享时用 --app.analyst.access-code=xxx 启动，
+    # 分享链接形如 https://<域名>/?code=xxx，拿到链接的人才能调接口
+    access-code: ${ANALYST_ACCESS_CODE:}

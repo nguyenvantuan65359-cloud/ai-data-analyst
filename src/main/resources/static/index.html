@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>数据分析专家</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    :root { --line:#e3e3e3; --ink:#1f1f1f; --muted:#777; --accent:#c0392b; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+           color:var(--ink); background:#fff; line-height:1.6; }
+    header { padding:18px 24px; border-bottom:1px solid var(--line); }
+    header h1 { font-size:18px; margin:0; font-weight:600; }
+    header p { margin:4px 0 0; color:var(--muted); font-size:13px; }
+    main { max-width:980px; margin:0 auto; padding:20px 24px 60px; }
+    .card { border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:18px; }
+    .card h2 { font-size:14px; margin:0 0 12px; font-weight:600; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    input[type=file], textarea, input[type=text], input[type=password] { font:inherit; }
+    textarea, input[type=text], input[type=password] { width:100%; border:1px solid var(--line); border-radius:8px;
+           padding:8px 10px; background:#fff; color:var(--ink); }
+    textarea { min-height:64px; resize:vertical; }
+    button { border:1px solid var(--ink); background:var(--ink); color:#fff; border-radius:8px;
+             padding:8px 16px; font:inherit; cursor:pointer; }
+    button.ghost { background:#fff; color:var(--ink); }
+    button:disabled { opacity:.5; cursor:default; }
+    .meta { color:var(--muted); font-size:13px; margin:8px 0; }
+    table { border-collapse:collapse; width:100%; font-size:12px; margin-top:10px; }
+    th,td { border:1px solid var(--line); padding:5px 8px; text-align:left; }
+    th { background:#f6f6f6; }
+    .err { color:var(--accent); font-size:13px; margin-top:8px; }    .ok { color:#1a7f37; }
+    /* 这次分析没用到用户数据时的醒目横幅：避免"以为在分析自己文件，其实在分析示例库" */
+    .datawarn { border:1px solid var(--accent); background:#fdf1f0; color:var(--accent);
+                font-size:13px; line-height:1.6; padding:8px 10px; border-radius:8px; margin-bottom:10px; }
+    select { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:8px; }
+    #chart { width:100%; height:280px; margin-top:12px; }
+    /* 多轮对话 */
+    #chat { max-height:520px; overflow:auto; }
+    .msg { margin:10px 0; }
+    .msg.q { text-align:right; }
+    .msg.q .bubble { display:inline-block; background:var(--ink); color:#fff; border-radius:10px 10px 2px 10px;
+                     padding:8px 12px; max-width:78%; text-align:left; font-size:14px; }
+    .msg.a .bubble { display:inline-block; background:#fafafa; border:1px solid var(--line);
+                     border-radius:2px 10px 10px 10px; padding:12px 14px; max-width:92%; width:100%;
+                     font-size:14px; white-space:pre-wrap; }
+    .msg.a .bubble h3 { font-size:13px; margin:12px 0 4px; font-weight:600; color:var(--ink); }
+    .msg.a .bubble h3:first-child { margin-top:0; }
+    .chartbox { width:100%; height:280px; margin-top:8px; }
+    .sqlbox { margin:0 0 10px; font-size:12px; color:#666; }
+    .sqlbox summary { cursor:pointer; user-select:none; }
+    .sqlbox code { display:block; margin-top:4px; padding:6px 8px; background:#f7f7f7;
+                   border:1px solid var(--line); border-radius:4px; white-space:pre-wrap; word-break:break-all; }
+    .cardrow { display:flex; justify-content:space-between; align-items:baseline; gap:10px;
+               padding:6px 0; border-bottom:1px solid var(--line); }
+    .cardq { cursor:pointer; color:#1a5fb4; text-decoration:underline dotted; }
+    .charttitle { margin-top:14px; font-size:12px; color:#444; border-left:3px solid #c0392b; padding-left:7px; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:6px; padding:1px 8px;
+            font-size:12px; color:var(--muted); margin-left:6px; }
+    pre.dict { white-space:pre-wrap; background:#fafafa; border:1px solid var(--line); border-radius:8px;
+              padding:12px; font-size:12.5px; max-height:320px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>数据分析专家</h1>
+    <p>配数据源 → 自动建数据字典 → 智能体按问题自选统计方法与图型 → 结论 + 图表 + 理论依据</p>
+  </header>
+  <main>
+    <div class="card">
+      <h2>0. 数据源（可选，默认本地 H2）</h2>
+      <div class="row">
+        <input type="text" id="dbUrl" placeholder="jdbc:mysql://主机:3306/库名" style="flex:2;min-width:260px">
+        <input type="text" id="dbUser" placeholder="用户名" style="flex:1;min-width:120px">
+        <input type="password" id="dbPass" placeholder="密码" style="flex:1;min-width:120px">
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button id="dbBtn">连接</button>
+        <button class="ghost" id="dbDropBtn">断开</button>
+        <button class="ghost" id="dictBtn" style="display:none;">查看数据字典</button>
+        <span class="meta" id="dbMeta">未配置（当前用本地 H2）</span>
+      </div>
+      <div class="meta" id="dbNote" style="display:none;">连接后：除 uploaded_data（本地上传）外，SQL 与 AI 查询都走该外部库，且仅允许 SELECT。</div>
+      <div id="dictWrap" style="display:none; margin-top:10px;"><pre class="dict" id="dictText"></pre></div>
+      <div class="row" style="margin-top:8px;">
+        <button class="ghost" id="ruleBtn">编辑业务口径规则</button>
+        <span class="meta">写一次，每次分析都带着——比如「活动只算进行中+报名成功待开始」</span>
+      </div>
+      <div id="ruleWrap" style="display:none; margin-top:8px;">
+        <textarea id="ruleText" rows="6" placeholder="例：&#10;统计活动时只算【进行中】和【报名成功待开始】，排除已退出/已结束/已售罄。&#10;金额统一折算为人民币，汇率取当月1日。&#10;退货口径：按下单月归属，不按退款月。"></textarea>
+        <div class="row" style="margin-top:6px;">
+          <button id="ruleSave">保存口径</button>
+          <span class="meta" id="ruleMeta"></span>
+        </div>
+      </div>
+      <div class="err" id="dbErr"></div>
+    </div>
+
+    <div class="card">
+      <h2>1. 导入数据</h2>
+      <div class="row">
+        <input type="file" id="file" accept=".csv,.xlsx,.xls,.xlsm">
+        <button id="uploadBtn">上传文件</button>
+        <span class="meta" id="upMeta"></span>
+      </div>
+      <div class="meta">或直接对数据库写一条 SELECT：</div>
+      <textarea id="sql" placeholder="SELECT * FROM orders LIMIT 1000"></textarea>
+      <div class="row" style="margin-top:8px;">
+        <button class="ghost" id="sqlBtn">执行 SQL</button>
+        <span class="meta">仅允许 SELECT，禁止增删改</span>
+      </div>
+      <div class="err" id="upErr"></div>
+    </div>
+
+    <div class="card" id="previewCard" style="display:none;">
+      <h2>2. 数据预览（手动探索）</h2>
+      <div class="row" style="margin-bottom:8px;">
+        <span class="meta">图表：</span>
+        <select id="chartType">
+          <option value="hist">直方图（数值分布）</option>
+          <option value="bar">柱状图（分类汇总 / 计数）</option>
+          <option value="line">折线图（趋势）</option>
+          <option value="scatter">散点图（相关性）</option>
+        </select>
+        <span class="meta">列A：</span>
+        <select id="colA"></select>
+        <span class="meta" id="colBLabel" style="display:none;">列B：</span>
+        <select id="colB" style="display:none;"></select>
+      </div>
+      <div id="chart"></div>
+      <div id="tableWrap" style="overflow:auto; max-height:260px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>3. 多轮对话分析</h2>
+      <div class="row" style="margin-bottom:8px;">
+        <span class="meta" id="sessMeta"></span>
+        <button class="ghost" id="histBtn">分析卡片</button>
+        <button class="ghost" id="newChatBtn">新会话</button>
+      </div>
+      <div id="histWrap" style="display:none; margin-bottom:10px;"></div>
+      <div id="chat"></div>
+      <div class="row" style="margin-top:10px;">
+        <input type="text" id="question" placeholder="例如：各区销售额谁最高？差异显著吗？" style="flex:1;">
+        <button id="askBtn">分析</button>
+      </div>
+      <div class="err" id="askErr"></div>
+    </div>
+  </main>
+
+<script>
+  let COLUMNS = [], SAMPLE = [];
+  let SESSION_ID = localStorage.getItem('analyst_sid') || newId();
+  localStorage.setItem('analyst_sid', SESSION_ID);
+  const CHART_INSTANCES = [];
+
+  // ---------- 访问口令（给别人用时，链接里带 ?code= 即可直接进）----------
+  const ACCESS_CODE = new URLSearchParams(location.search).get('code')
+                      || localStorage.getItem('analyst_code') || '';
+  if (ACCESS_CODE) localStorage.setItem('analyst_code', ACCESS_CODE);
+  const _fetch = window.fetch.bind(window);
+  window.fetch = function(u, o){
+    o = o || {};
+    o.headers = Object.assign({}, o.headers || {}, { 'X-Access-Code': ACCESS_CODE });
+    o.credentials = 'same-origin';
+    return _fetch(u, o).then(r => {
+      if (r.status === 401) showErr('askErr', '访问口令不正确或已失效，请向管理员索取带 code 的链接');
+      return r;
+    });
+  };
+
+  function newId(){ return 's-' + Math.random().toString(36).slice(2,10); }
+  function showErr(el, msg){ document.getElementById(el).textContent = msg || ''; }
+  function esc(x){ return (x==null?'':String(x)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+  // 统一读响应：后端或隧道异常时会吐 HTML 错误页，直接 r.json() 只会留一句
+  // "Unexpected token '<'"——把真正原因（HTTP 码 + 是断连还是后端报错）翻成人话。
+  async function readJson(r){
+    const text = await r.text();
+    const ct = (r.headers.get('content-type') || '').toLowerCase();
+    if (ct.indexOf('json') >= 0 || text.trim().charAt(0) === '{') {
+      try { return JSON.parse(text); } catch(e) { /* 落到下面按非 JSON 处理 */ }
+    }
+    let msg;
+    if (r.status === 502 || r.status === 503 || r.status === 504 || r.status === 0) {
+      msg = '服务暂时不可用（隧道或后端已断开，HTTP ' + (r.status || '网络错误') + '），请稍等片刻重试';
+    } else if (r.status === 401) {
+      msg = '访问口令不正确或已失效，请用带 code 的完整链接打开';
+    } else if (r.status === 404) {
+      msg = '接口不存在（HTTP 404）：后端可能是旧版本，请重启服务';
+    } else {
+      msg = '服务返回了非 JSON 内容（HTTP ' + r.status + '），多半是后端异常或公网链接已过期';
+    }
+    const err = new Error(msg); err.httpStatus = r.status; throw err;
+  }
+
+  // 分析请求很慢（reasoner 30~60s），免费隧道偶尔抖一下会直接 502。
+  // 只对"网关类"错误重试一次，业务错误不重试（避免重复计费）。
+  async function postAnalyze(body){
+    let lastErr;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await fetch('/api/analyst/ask',{method:'POST',headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body)});
+        if (attempt === 0 && [502,503,504].indexOf(r.status) >= 0) { await new Promise(s=>setTimeout(s,1500)); continue; }
+        return { r: r, j: await readJson(r) };
+      } catch(e) {
+        lastErr = e;
+        if (attempt === 0 && !e.httpStatus) { await new Promise(s=>setTimeout(s,1500)); continue; }
+        throw e;
+      }
+    }
+    throw lastErr;
+  }
+
+  // ---------- 数据源 + 数据字典 ----------
+  function refreshSess(){ document.getElementById('sessMeta').textContent = '会话 ' + SESSION_ID; }
+  async function loadDbStatus(){
+    try {
+      const j = await readJson(await fetch('/api/analyst/db'));
+      const meta = document.getElementById('dbMeta');
+      const note = document.getElementById('dbNote');
+      if (j.configured){
+        meta.textContent = '已连接 ' + j.url + '（' + j.tables.length + ' 张表，已生成数据字典）';
+        meta.className = 'meta ok'; note.style.display = 'block';
+        document.getElementById('dbBtn').textContent = '重连';
+        if (j.profile) { document.getElementById('dictText').textContent = j.profile; document.getElementById('dictBtn').style.display = ''; }
+      } else {
+        meta.textContent = '未配置（当前用本地 H2）';
+        meta.className = 'meta'; note.style.display = 'none';
+        document.getElementById('dbBtn').textContent = '连接';
+        document.getElementById('dictBtn').style.display = 'none';
+        document.getElementById('dictWrap').style.display = 'none';
+      }
+    } catch(e){}
+  }
+  document.getElementById('dbBtn').onclick = async ()=>{
+    showErr('dbErr','');
+    const url = document.getElementById('dbUrl').value.trim();
+    if(!url){ showErr('dbErr','请填写 JDBC URL'); return; }
+    const btn = document.getElementById('dbBtn'); btn.disabled = true; btn.textContent = '连接中…';
+    try {
+      const r = await fetch('/api/analyst/db',{method:'POST',headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ url, username: document.getElementById('dbUser').value.trim(),
+                                password: document.getElementById('dbPass').value })});
+      const j = await readJson(r);
+      if(!r.ok){ showErr('dbErr', j.reason || j.error || '连接失败'); return; }
+      const few = (j.tables||[]).slice(0,8).join('、');
+      document.getElementById('dbMeta').textContent = '已连接（' + j.tables.length + ' 张表：' + few + ((j.tables.length>8)?' …':'') + '）';
+      document.getElementById('dbMeta').className = 'meta ok';
+      document.getElementById('dbNote').style.display = 'block';
+      document.getElementById('dbBtn').textContent = '重连';
+      if (j.profile){
+        document.getElementById('dictText').textContent = j.profile;
+        document.getElementById('dictBtn').style.display = '';
+        document.getElementById('dictWrap').style.display = 'block';
+      }
+    } catch(e){ showErr('dbErr','请求失败：' + e.message); }
+    finally { btn.disabled = false; }
+  };
+  document.getElementById('dbDropBtn').onclick = async ()=>{
+    await fetch('/api/analyst/db',{method:'DELETE'});
+    loadDbStatus(); showErr('dbErr','');
+  };
+  document.getElementById('dictBtn').onclick = ()=>{
+    const w = document.getElementById('dictWrap');
+    w.style.display = (w.style.display === 'none') ? 'block' : 'none';
+  };
+
+  // ---------- 预览与手动图表 ----------
+  function colOpts(id, defIdx){
+    const sel = document.getElementById(id); sel.innerHTML = '';
+    COLUMNS.forEach((c,i)=>{ const o=document.createElement('option'); o.value=i; o.textContent=c; sel.appendChild(o); });
+    if(defIdx!=null) sel.value = defIdx;
+  }
+  function isNumCol(i){
+    let num=0, seen=0;
+    SAMPLE.forEach(r=>{ const v=r[i]; if(v==null||v==='') return; seen++;
+      if(!isNaN(parseFloat(v)) && isFinite(v)) num++; });
+    return seen>0 && num/seen>=0.8;
+  }
+  function distinctCount(i){ const s=new Set(); SAMPLE.forEach(r=>s.add(r[i])); return s.size; }
+
+  async function preview(table){
+    COLUMNS = table.columns; SAMPLE = table.sample;
+    document.getElementById('upMeta').textContent = '已载入 ' + table.rows + ' 行，' + COLUMNS.length + ' 列';
+    document.getElementById('previewCard').style.display = 'block';
+    colOpts('colA', 0); colOpts('colB', 0);
+    let numIdx = COLUMNS.findIndex((_,i)=>isNumCol(i));
+    if(numIdx<0) numIdx = 0;
+    document.getElementById('colA').value = numIdx;
+    document.getElementById('colB').value = COLUMNS.findIndex((_,i)=>i!==numIdx && isNumCol(i));
+    document.getElementById('chartType').value = (distinctCount(numIdx)<=12) ? 'bar' : 'hist';
+    renderChart(); renderTable();
+  }
+
+  function renderTable(){
+    let h = '<table><thead><tr>'; COLUMNS.forEach(c=>h+='<th>'+esc(c)+'</th>'); h+='</tr></thead><tbody>';
+    SAMPLE.forEach(r=>{ h+='<tr>'; COLUMNS.forEach((c,i)=>h+='<td>'+esc(r[i])+'</td>'); h+='</tr>'; });
+    h+='</tbody></table>';
+    document.getElementById('tableWrap').innerHTML = h;
+  }
+
+  function needColB(){ return ['bar','line','scatter'].includes(document.getElementById('chartType').value); }
+
+  function renderChart(){
+    const t = document.getElementById('chartType').value;
+    const a = +document.getElementById('colA').value;
+    const bEl = document.getElementById('colB');
+    document.getElementById('colBLabel').style.display = needColB() ? '' : 'none';
+    bEl.style.display = needColB() ? '' : 'none';
+    const b = +bEl.value;
+    if(t==='hist'){ renderHist(a); return; }
+    if(!needColB()) return;
+    if(t==='scatter'){
+      if(!isNumCol(a)||!isNumCol(b)){ draw(document.getElementById('chart'), {title:{text:'散点图需要两列都是数值',left:'center',textStyle:{color:'#c0392b',fontSize:13}}}); return; }
+      const pts = SAMPLE.map(r=>[parseFloat(r[a]),parseFloat(r[b])]).filter(p=>isFinite(p[0])&&isFinite(p[1])).slice(0,500);
+      draw(document.getElementById('chart'), { grid:{left:48,right:16,top:20,bottom:36},
+        xAxis:{type:'value',name:COLUMNS[a],nameFontSize:10}, yAxis:{type:'value',name:COLUMNS[b],nameFontSize:10},
+        series:[{type:'scatter',data:pts,itemStyle:{color:'#1f1f1f'},symbolSize:6}] });
+      return;
+    }
+    const useSum = b!==a && !isNaN(b) && isNumCol(b);
+    const agg = new Map();
+    SAMPLE.forEach(r=>{
+      const k = r[a]==null?'(空)':String(r[a]);
+      let v = useSum ? parseFloat(r[b]) : 1;
+      if(useSum && !isFinite(v)) v = 0;
+      agg.set(k,(agg.get(k)||0)+v);
+    });
+    let entries = [...agg.entries()];
+    if(t==='bar') entries.sort((x,y)=>y[1]-x[1]);
+    else entries.sort((x,y)=>{ const nx=parseFloat(x[0]), ny=parseFloat(y[0]);
+      if(isFinite(nx)&&isFinite(ny)) return nx-ny; return String(x[0]).localeCompare(String(y[0]),'zh'); });
+    if(entries.length>20) entries = entries.slice(0,20);
+    const cats = entries.map(e=>e[0]), vals = entries.map(e=>+e[1].toFixed(2));
+    const yName = useSum ? ('SUM('+COLUMNS[b]+')') : '计数';
+    const color = t==='line' ? '#c0392b' : '#1f1f1f';
+    draw(document.getElementById('chart'), { grid:{left:56,right:16,top:24,bottom:56},
+      xAxis:{type:'category',data:cats,axisLabel:{fontSize:10,rotate:cats.some(c=>c.length>4)?30:0}},
+      yAxis:{type:'value',name:yName,nameFontSize:10},
+      series:[Object.assign({type:t,data:vals,itemStyle:{color:color}},
+        t==='line'?{smooth:true,lineStyle:{color:color}}:{})] });
+  }
+
+  function renderHist(ci){
+    const vals = SAMPLE.map(r=>parseFloat(r[ci])).filter(v=>!isNaN(v));
+    if(vals.length===0){ draw(document.getElementById('chart'), {title:{text:'该列非数值，无法画直方图（可选柱状图按分类看计数）',left:'center',textStyle:{color:'#c0392b',fontSize:13}}}); return; }
+    const min=Math.min(...vals), max=Math.max(...vals), bins=10, w=(max-min)/bins||1;
+    const counts=new Array(bins).fill(0);
+    vals.forEach(v=>{ let b=Math.min(bins-1, Math.floor((v-min)/w)); counts[b]++; });
+    const labels=counts.map((_,i)=>(min+i*w).toFixed(1));
+    draw(document.getElementById('chart'), { grid:{left:40,right:16,top:16,bottom:30},
+      xAxis:{type:'category',data:labels,axisLabel:{fontSize:10}}, yAxis:{type:'value'},
+      series:[{type:'bar',data:counts,itemStyle:{color:'#1f1f1f'}}] });
+  }
+
+  function draw(el, option){
+    if(!el) return;
+    const old = echarts.getInstanceByDom(el);
+    if(old) echarts.dispose(old);
+    const inst = echarts.init(el);
+    inst.setOption(option);
+    CHART_INSTANCES.push(inst);
+  }
+
+  // ---------- 多轮对话 ----------
+  function addMsg(role, html){
+    const box = document.getElementById('chat');
+    const d = document.createElement('div');
+    d.className = 'msg ' + role;
+    d.innerHTML = '<div class="bubble">' + html + '</div>';
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+    return d;
+  }
+
+  /** 极简 markdown 渲染：标题/表格/粗体/列表，够用且不引第三方库 */
+  function md(src){
+    if(!src) return '';
+    let s = esc(src);
+    const lines = s.split('\n');
+    let out = [], inTable = false, tbl = [];
+    function flushTable(){
+      if(!tbl.length) return;
+      let h = '<table>';
+      const head = tbl[0];
+      h += '<thead><tr>' + head.map(c=>'<th>'+c+'</th>').join('') + '</tr></thead><tbody>';
+      for(let i=1;i<tbl.length;i++){
+        const first = tbl[i][0]||'';
+        if(/^\s*-{3,}\s*$/.test(first)) continue;
+        h += '<tr>' + tbl[i].map(c=>'<td>'+c+'</td>').join('') + '</tr>';
+      }
+      h += '</tbody></table>';
+      out.push(h); tbl = []; inTable = false;
+    }
+    lines.forEach(ln=>{
+      const t = ln.trim();
+      if(/^\|.*\|$/.test(t)){
+        const cells = t.slice(1,-1).split('|').map(c=>c.trim());
+        if(!inTable){ flushTable(); inTable = true; }
+        tbl.push(cells); return;
+      } else if(inTable){ flushTable(); }
+      if(t.startsWith('### ')) out.push('<h3>'+t.slice(4)+'</h3>');
+      else if(t.startsWith('## ')) out.push('<h3>'+t.slice(3)+'</h3>');
+      else if(t.startsWith('# ')) out.push('<h3>'+t.slice(2)+'</h3>');
+      else if(t.startsWith('- ')) out.push('<div>· '+t.slice(2)+'</div>');
+      else if(t) out.push('<div>'+t+'</div>');
+    });
+    if(inTable) flushTable();
+    return out.join('').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
+  }
+
+  function renderAiChart(hostEl, spec, data){
+    const cols = (data && data.columns) || [];
+    const rows = (data && data.rows) || [];
+    if(!cols.length || !rows.length){ hostEl.style.display='none'; return; }
+    hostEl.style.display='';
+    const t = spec.type;
+    const color = (t==='line') ? '#c0392b' : '#1f1f1f';
+
+    if(t==='hist'){
+      const vals = rows.map(r=>parseFloat(r[0])).filter(v=>!isNaN(v));
+      const min=Math.min(...vals), max=Math.max(...vals), bins=10, w=(max-min)/bins||1;
+      const counts=new Array(bins).fill(0);
+      vals.forEach(v=>{ counts[Math.min(bins-1, Math.floor((v-min)/w))]++; });
+      const labels=counts.map((_,i)=>(min+i*w).toFixed(1));
+      draw(hostEl, { grid:{left:40,right:16,top:16,bottom:30},
+        xAxis:{type:'category',data:labels,axisLabel:{fontSize:10}}, yAxis:{type:'value'},
+        series:[{type:'bar',data:counts,itemStyle:{color:'#1f1f1f'}}] });
+      return;
+    }
+
+    if(t==='scatter'){
+      const pts = rows.map(r=>[parseFloat(r[0]),parseFloat(r[1])]).filter(p=>isFinite(p[0])&&isFinite(p[1])).slice(0,500);
+      draw(hostEl, { grid:{left:48,right:16,top:20,bottom:36},
+        xAxis:{type:'value',name:spec.x||'',nameFontSize:10}, yAxis:{type:'value',name:spec.y||'',nameFontSize:10},
+        series:[{type:'scatter',data:pts,itemStyle:{color:'#1f1f1f'},symbolSize:6}] });
+      return;
+    }
+
+    const cats = rows.map(r=> r[0]==null?'(空)':String(r[0]));
+    const vals = rows.map(r=>{ const v=parseFloat(r[1]); return isFinite(v)? +v.toFixed(2) : 0; });
+    if(t==='pie'){
+      draw(hostEl, { tooltip:{trigger:'item'},
+        series:[{type:'pie',radius:['0','62%'],data:cats.map((c,i)=>({name:c,value:vals[i]})),
+                 color:['#1f1f1f','#c0392b','#777','#bbb','#555','#e3e3e3','#8e8e8e','#f0f0f0']}] });
+      return;
+    }
+    draw(hostEl, { grid:{left:56,right:16,top:24,bottom:56},
+      xAxis:{type:'category',data:cats,axisLabel:{fontSize:10,rotate:cats.some(c=>c.length>4)?30:0}},
+      yAxis:{type:'value',name:spec.y||'',nameFontSize:10},
+      series:[Object.assign({type:t,data:vals,itemStyle:{color:color}},
+        t==='line'?{smooth:true,lineStyle:{color:color}}:{})] });
+  }
+
+  document.getElementById('askBtn').onclick = async ()=>{
+    showErr('askErr','');
+    const q = document.getElementById('question').value.trim();
+    if(!q){ showErr('askErr','请输入问题'); return; }
+    document.getElementById('question').value = '';
+    const box = addMsg('q', esc(q));
+    const pending = addMsg('a', '<span class="meta">智能体分析中…（会先读数据字典、再自选统计方法与图型）</span>');
+
+    try {
+      const res = await postAnalyze({ question: q, sessionId: SESSION_ID });
+      const r = res.r, j = res.j;
+      if(!r.ok){ showErr('askErr', j.reason || j.error || '分析失败'); pending.remove(); return; }
+
+      // 一次回答可能带多张图：优先用 charts 数组，老结构回退成单张
+      const charts = Array.isArray(j.charts) && j.charts.length
+        ? j.charts
+        : (j.chart && j.chartData ? [Object.assign({}, j.chart, { data: j.chartData })] : []);
+
+      // 后端明确告诉我们"这次没有用到你自己的数据"时，先挂一条红框提示，
+      // 不能让人读完一大段结论才发现分析的是示例表。
+      const warn = (j.dataReady === false)
+        ? '<div class="datawarn">⚠ 这次分析<b>没有用到你上传的数据</b>：本会话当前没有已载入的文件'
+        + '（上传可能没成功，或服务重启把会话清空了）。<br>请回到「1.导入数据」重新选文件上传，'
+        + '看到<span class="ok">「已载入 N 行」</span>之后再提问。</div>'
+        : '';
+
+      let html = '<div class="bubble">' + warn + md(j.answer || '')
+        + (j.cached ? '<div class="tag">命中缓存（同问题+同数据态，10 分钟内复用）</div>' : '')
+        + '<div class="tag">会话记忆：' + esc(j.memory || '') + '</div>';
+      charts.forEach((c, i) => {
+        const d = c.data || {};
+        const rows = Array.isArray(d.rows) ? d.rows.length : 0;
+        const total = d.returnedRows || rows;
+        const trunc = d.truncated ? '（画图仅取前 ' + rows + ' 行）' : '';
+        // 口径可见：把每张图背后的 SQL 与行数摊开，"这个结论基于哪次查询"可追溯
+        html += '<div class="charttitle">图 ' + (i + 1) + ' · ' + esc(c.title || c.type || '') + '</div>'
+             +  '<div class="chartbox"></div>'
+             +  '<details class="sqlbox"><summary>数据口径 · ' + total + ' 行' + trunc + '</summary><code>' + esc(c.sql || '') + '</code></details>';
+      });
+      html += '</div>';
+      pending.innerHTML = html;
+
+      const boxes = pending.querySelectorAll('.chartbox');
+      charts.forEach((c, i) => { if (boxes[i]) { boxes[i].style.display = ''; renderAiChart(boxes[i], c, c.data); } });
+      loadCards();   // 每次回答都沉淀成卡片，顺手刷新历史列表
+    } catch(e){
+      showErr('askErr','请求失败：' + e.message);
+      pending.remove();
+    }
+  };
+  document.getElementById('question').addEventListener('keydown', e=>{ if(e.key==='Enter') document.getElementById('askBtn').click(); });
+
+  // ---------- 业务口径规则 ----------
+  document.getElementById('ruleBtn').onclick = async ()=>{
+    const wrap=document.getElementById('ruleWrap');
+    if(wrap.style.display!=='none'){ wrap.style.display='none'; return; }
+    const r=await fetch('/api/analyst/rules'); const j=await readJson(r);
+    document.getElementById('ruleText').value=j.rules||'';
+    document.getElementById('ruleMeta').textContent=j.configured?'已生效（每次分析自动带上）':'未配置';
+    wrap.style.display='';
+  };
+  document.getElementById('ruleSave').onclick = async ()=>{
+    const rules=document.getElementById('ruleText').value;
+    const r=await fetch('/api/analyst/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rules})});
+    const j=await readJson(r); if(!r.ok){ document.getElementById('ruleMeta').textContent=j.reason||'保存失败'; return; }
+    document.getElementById('ruleMeta').textContent='已保存（' + (j.rules?j.rules.length:0) + ' 字，立即生效）';
+  };
+
+  // ---------- 分析卡片（沉淀复用）----------
+  const histWrap=document.getElementById('histWrap');
+  async function loadCards(){
+    try{
+      const r=await fetch('/api/analyst/cards?sessionId='+encodeURIComponent(SESSION_ID));
+      const cards=(await readJson(r)).cards||[];
+      if(!cards.length){ histWrap.innerHTML='<div class="meta">还没有分析卡片。问过一次之后，这里会保存「问题+图表+结论」，下次做同类分析可以直接翻出来。</div>'; return; }
+      histWrap.innerHTML='<div class="meta" style="margin-bottom:6px;">分析卡片 '+cards.length+' 张（点标题回看）</div>'
+        + cards.map(c=>'<div class="cardrow"><span class="cardq" data-id="'+esc(c.id)+'">'+esc(c.question)+'</span>'
+            + '<span class="meta">'+esc(String(c.at||'').slice(0,16).replace('T',' '))+' · '+c.charts+' 图</span></div>').join('');
+      histWrap.querySelectorAll('.cardq').forEach(el=>{
+        el.onclick = async ()=>{
+          const wrap=document.getElementById('chat');
+          const id=el.dataset.id;
+          const r=await fetch('/api/analyst/cards/'+encodeURIComponent(id)+'?sessionId='+encodeURIComponent(SESSION_ID));
+          if(!r.ok){ showErr('askErr','卡片读取失败'); return; }
+          const card=await readJson(r);
+          const div=document.createElement('div');
+          div.className='bubble';
+          div.innerHTML = '<div class="tag">回看卡片 · '+esc(String(card.at||'').slice(0,16).replace('T',' '))+'</div>'
+            + '<div class="meta">当时的提问：'+esc(card.question||'')+'</div>' + md(card.answer||'');
+          wrap.appendChild(div);
+          (card.charts||[]).forEach(c=>{
+            const box=document.createElement('div'); box.className='chartbox'; box.style.height='240px';
+            div.appendChild(box); renderAiChart(box, c, c.data);
+          });
+          wrap.scrollTop = wrap.scrollHeight;
+        };
+      });
+    }catch(e){ /* 卡片列表失败不影响主流程 */ }
+  }
+  document.getElementById('histBtn').onclick = ()=>{
+    if(histWrap.style.display!=='none'){ histWrap.style.display='none'; return; }
+    histWrap.style.display=''; loadCards();
+  };
+  loadCards();
+
+  // ---------- 导入 ----------
+  // 浏览器有个坑：页面刷新/会话恢复后，文件框里可能还显示着上次的文件名，但 input.files
+  // 已经空了（安全策略）。点上传就报"请先选择文件"，人看着文件名在那儿，以为是自己没选对。
+  // 所以选中的瞬间就把 File 对象抓下来存住，点击时以它为准。
+  let PICKED_FILE = null;
+  document.getElementById('file').addEventListener('change', e=>{
+    PICKED_FILE = (e.target.files && e.target.files[0]) || null;
+    showErr('upErr','');
+    document.getElementById('upMeta').textContent = PICKED_FILE
+      ? '已选择：' + PICKED_FILE.name + '（' + Math.max(1, Math.round(PICKED_FILE.size/1024)) + ' KB），点右侧按钮上传'
+      : '';
+  });
+
+  document.getElementById('uploadBtn').onclick = async ()=>{
+    showErr('upErr','');
+    const input = document.getElementById('file');
+    const f = (input.files && input.files[0]) || PICKED_FILE;
+    if(!f){
+      showErr('upErr','没读到文件内容：文件框里的名字可能是页面刷新前的残留。请重新点「选择文件」选一次。');
+      return;
+    }
+    const btn = document.getElementById('uploadBtn');
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = '上传中…';
+    try{
+      const fd=new FormData();
+      fd.append('file',f);
+      fd.append('sessionId', SESSION_ID);   // 告诉后端这次上传落到哪个会话的表
+      const r=await fetch('/api/analyst/upload',{method:'POST',body:fd});
+      const j=await readJson(r);
+      if(!r.ok){ showErr('upErr',j.reason||j.error||'上传失败'); return; }
+      if (j.table) document.getElementById('sessMeta').textContent =
+        '会话 ' + SESSION_ID + ' · 表 ' + j.table;
+      PICKED_FILE = null;
+      preview(j);   // 预览会把行数/列数写进 upMeta —— 这就是"传成功了"的证据
+    } catch(e){
+      showErr('upErr','上传失败：' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = old;
+    }
+  };
+  document.getElementById('sqlBtn').onclick = async ()=>{
+    showErr('upErr',''); const sql=document.getElementById('sql').value.trim();
+    if(!sql){ showErr('upErr','请输入 SQL'); return; }
+    const r=await fetch('/api/analyst/sql',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({sql, sessionId: SESSION_ID})});
+    const j=await readJson(r); if(!r.ok){ showErr('upErr',j.reason||j.error||'执行失败'); return; }
+    preview(j);
+  };
+  ['chartType','colA','colB'].forEach(id=>document.getElementById(id).addEventListener('change', renderChart));
+
+  document.getElementById('newChatBtn').onclick = async ()=>{
+    await fetch('/api/analyst/chat',{method:'DELETE',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ sessionId: SESSION_ID })});
+    document.getElementById('chat').innerHTML = '';
+    SESSION_ID = newId();
+    localStorage.setItem('analyst_sid', SESSION_ID);
+    refreshSess();
+    checkSessionState();
+  };
+
+  // 服务重启会清空会话里的表，但浏览器还记着旧 sessionId。
+  // 不查这一步，用户会以为文件还在，而 AI 其实已经在答示例表——"怎么又分析本地库了"。
+  async function checkSessionState(){
+    try{
+      const j = await readJson(await fetch('/api/analyst/state?sessionId='+encodeURIComponent(SESSION_ID)));
+      const meta = document.getElementById('upMeta');
+      if (j.pinned){
+        meta.textContent = '当前分析对象：' + j.source + '（' + j.rows + ' 行，' + (j.columns||[]).length + ' 列）';
+      } else {
+        meta.textContent = '⚠ 当前会话没有数据（服务重启会清空）。请重新上传文件或执行 SQL 再提问。';
+      }
+    }catch(e){ /* 状态查不到不阻塞使用 */ }
+  }
+
+  refreshSess();
+  loadDbStatus();
+  checkSessionState();
+</script>
+</body>
+</html>
