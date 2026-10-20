@@ -68,6 +68,10 @@ public class AnalystAgent {
     @Value("${app.analyst.verifier:true}")
     private boolean verifier;
 
+    /** 是否做算术复算（差值/百分比能否用文中数字复现）。实测这是最容易翻车的地方 */
+    @Value("${app.analyst.arith-check:true}")
+    private boolean arithCheck;
+
     @Value("${app.analyst.max-agent-steps:8}")
     private int maxSteps;
 
@@ -152,6 +156,7 @@ public class AnalystAgent {
 
         AnalystResult best = null;
         List<String> issues = List.of();
+        List<String> suggestions = new java.util.ArrayList<>();
         int attempts = 0;
 
         for (int round = 0; round <= maxReplans; round++) {
@@ -164,9 +169,15 @@ public class AnalystAgent {
             best = r;
 
             List<String> found = new java.util.ArrayList<>(SelfCheck.check(r));
+            // 算术复算：差值和百分比必须能用文中出现的数字算出来（模型心算最不可靠）
+            if (arithCheck) {
+                found.addAll(ArithCheck.check(r.answer()));
+            }
             // 最后一轮不再复核：已经没有重做的机会，多花一次调用没意义
             if (verifier && round < maxReplans) {
-                found.addAll(verify(question, plan, r));
+                Critique c = verify(question, plan, r);
+                found.addAll(c.blocking());
+                suggestions.addAll(c.suggestions());
             }
             if (found.isEmpty()) {
                 issues = List.of();
@@ -183,6 +194,10 @@ public class AnalystAgent {
         if (!issues.isEmpty()) {
             out = appendNote(out, "\n\n---\n**自检提示**：以下问题在重做后仍未完全解决，请谨慎采信结论：\n- "
                     + String.join("\n- ", issues));
+        }
+        if (!suggestions.isEmpty()) {
+            out = appendNote(out, "\n\n**方法学补充（不影响结论方向，未重做）**：\n- "
+                    + String.join("\n- ", suggestions));
         }
         return out;
     }
@@ -313,8 +328,13 @@ public class AnalystAgent {
         }
     }
 
+    /** 复核结论：blocking 会导致重做；suggestion 只附在答案末尾，不花重做的钱 */
+    private record Critique(List<String> blocking, List<String> suggestions) {
+        static Critique empty() { return new Critique(List.of(), List.of()); }
+    }
+
     /** 第二步之后：复核员挑刺。只报真问题，宁可少报也不要凑数——凑数会让重做变成瞎改 */
-    private List<String> verify(String question, AnalysisPlan plan, AnalystResult r) {
+    private Critique verify(String question, AnalysisPlan plan, AnalystResult r) {
         String charts = "（无图）";
         if (r.charts() != null && !r.charts().isEmpty()) {
             StringBuilder sb = new StringBuilder();
@@ -333,8 +353,16 @@ public class AnalystAgent {
                 3. 断言超出证据：把相关说成因果、把描述性排名说成"显著更高"、给出数据里根本没有的字段；
                 4. 口径缺失：没交代筛选条件、样本量、缺失值处理方式，导致结论无法复现。
 
-                输出严格 JSON，不要代码块：{"issues":["具体指出哪里不对、应该改成什么"]}
-                没有任何问题时输出 {"issues":[]}。**不要提出措辞、排版、语气类的意见，那不是问题。**
+                严重度分级（很重要，决定了要不要重做）：
+                - "blocking"：数字算错了、前后矛盾、把描述说成因果、用了数据里没有的字段——必须改；
+                - "suggestion"：方法学不够严谨（该做 Levene 而不是看方差比、该分组做正态性检验、该补置信区间）——
+                  这些写进「局限」即可，不需要推翻结论重做。
+
+                **核查后认为没问题的条目，一条都不要列。** 每条的问题描述里必须给出「应改为」或「应补充」的具体改法。
+                没有任何问题时输出 {"issues":[]}。不要提出措辞、排版、语气类的意见，那不是问题。
+
+                输出严格 JSON，不要代码块：
+                {"issues":[{"level":"blocking|suggestion","text":"哪里不对、应改为…"}]}
                 """;
         String user = "用户问题：" + question
                 + "\n\n原计划：\n" + plan.render()
@@ -343,18 +371,52 @@ public class AnalystAgent {
 
         try {
             String json = extractJson(callCheap(system, user));
-            if (json == null) return List.of();
+            if (json == null) return Critique.empty();
             com.fasterxml.jackson.databind.JsonNode n = om.readTree(json);
-            List<String> out = new java.util.ArrayList<>();
+            List<String> blocking = new java.util.ArrayList<>();
+            List<String> suggest = new java.util.ArrayList<>();
             for (com.fasterxml.jackson.databind.JsonNode i : n.path("issues")) {
-                String s = i.asText("");
-                if (!s.isBlank()) out.add(s);
+                String text = i.isObject() ? i.path("text").asText("") : i.asText("");
+                String level = i.isObject() ? i.path("level").asText("blocking") : "blocking";
+                if (text.isBlank()) continue;
+                if (!actionable(text)) continue;              // 只报"核查后没问题"的噪音，直接丢掉
+                if ("suggestion".equalsIgnoreCase(level)) suggest.add(text);
+                else blocking.add(text);
             }
-            return out.size() > 4 ? out.subList(0, 4) : out;
+            // 防御：模型没按要求分级时，把"方法学不够严谨"这类自动降级为建议，避免无谓重做
+            List<String> realBlock = new java.util.ArrayList<>();
+            for (String t : blocking) {
+                if (isMethodologyNitpick(t)) suggest.add(t); else realBlock.add(t);
+            }
+            return new Critique(cap(realBlock, 3), cap(suggest, 3));
         } catch (Exception e) {
             log.warn("复核调用失败，跳过本轮复核：{}", e.toString());
-            return List.of();
+            return Critique.empty();
         }
+    }
+
+    private static List<String> cap(List<String> in, int n) {
+        return in.size() <= n ? in : in.subList(0, n);
+    }
+
+    /** 复核意见是否给出了具体改法；只描述现状、或自己都说"一致/无矛盾"的，不算问题 */
+    private static boolean actionable(String t) {
+        boolean givesFix = t.contains("应改") || t.contains("应补充") || t.contains("建议改")
+                || t.contains("应删除") || t.contains("应明确") || t.contains("应报告") || t.contains("需改为");
+        if (!givesFix) return false;
+        boolean selfNegating = (t.contains("无矛盾") || t.contains("此项无误") || t.contains("此处一致")
+                || t.contains("尚可接受")) && !t.contains("但");
+        return !selfNegating;
+    }
+
+    /** 方法学完善度类意见：写进局限就行，不值得为它重跑一轮（贵且慢） */
+    private static boolean isMethodologyNitpick(String t) {
+        boolean method = t.contains("Levene") || t.contains("Bartlett") || t.contains("Shapiro")
+                || t.contains("Lilliefors") || t.contains("方差齐性") || t.contains("正态性")
+                || t.contains("置信区间") || t.contains("效应量");
+        boolean blockingWords = t.contains("算错") || t.contains("矛盾") || t.contains("对不上")
+                || t.contains("不存在") || t.contains("因果");
+        return method && !blockingWords;
     }
 
     /** 从模型输出里抠出第一个 JSON 对象（模型常加 ```json 或前后废话） */
@@ -478,6 +540,11 @@ public class AnalystAgent {
                 3. 表里列的工具都真实存在，直接用；**不要编造不存在的工具**。
                 4. 工具报错或返回"样本不足"时，如实告诉用户缺什么，不要改口给出结论。
                 5. 需要用 SQL 聚合时请先确认列名以防万一；列名找不到时工具会给出可用列清单。
+                6. **禁止心算派生指标**：差值（多/少多少元）、占比、环比同比、客单价、人均、转化率，
+                   凡是需要做减法或除法的，一律先用 SQL 算出来再引用（例：
+                   `SELECT MIN(total), MAX(total), MAX(total)-MIN(total) AS diff FROM (...)`)；
+                   确实要自己算的，必须在正文写出算式和分母（如「15.5% = 18,877 / 121,972」）。
+                   心算出来的数字会被算术复算打回。
 
                 ─────────── 第二步：图型选择规则 ───────────
                 - hist：看单个数值列的分布。sql 只返回这一列，前端自动分箱。
