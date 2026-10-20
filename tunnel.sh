@@ -21,7 +21,9 @@ if tasklist 2>/dev/null | grep -qi cloudflared; then
   echo "隧道已在运行："
 else
   rm -f "$LOG"
-  nohup "$CF" tunnel --url http://localhost:8080 --no-autoupdate > "$LOG" 2>&1 &
+  # --protocol http2：默认走 QUIC(UDP)，在国内网络/公司网里容易被丢包或封掉，
+  # 表现就是浏览器 ERR_CONNECTION_CLOSED（而本机 curl 有时还能通）。改走 TCP 更稳。
+  nohup "$CF" tunnel --url http://localhost:8080 --no-autoupdate --protocol http2 > "$LOG" 2>&1 &
   for i in $(seq 1 30); do
     grep -q "trycloudflare.com" "$LOG" 2>/dev/null && break
     sleep 1
