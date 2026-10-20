@@ -62,7 +62,7 @@ app:
     # 最多重做几次（不含首次执行）
     max-replans: 1
     # 单次问答允许的工具调用次数（做在工具入口上，超了强制无工具收尾）
-    max-tool-calls: 12
+    max-tool-calls: 50
     # 规划/复核用的快模型：这两步不需要深度推理
     plan-model: deepseek-chat
     # 是否让模型复核（挑刺）；关掉只保留代码级自检

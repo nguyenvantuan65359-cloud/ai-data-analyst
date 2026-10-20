@@ -16,7 +16,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class ToolBudget {
 
-    @Value("${app.analyst.max-tool-calls:12}")
+    @Value("${app.analyst.max-tool-calls:50}")
     private int configuredMax;
 
     private static final ThreadLocal<State> TL = new ThreadLocal<>();

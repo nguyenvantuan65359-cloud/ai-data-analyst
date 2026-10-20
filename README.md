@@ -140,7 +140,7 @@ bash tunnel.sh --restart    # 地址变了就重起（机器重启后）
 | `access-code` | 空 | 共享访问口令，空=不校验 |
 | `planning` | true | 自主规划开关，关掉退回单轮工具调用 |
 | `max-replans` | 1 | 被自检打回后最多重做几次 |
-| `max-tool-calls` | 12 | 单次问答的工具调用上限（超了强制收尾） |
+| `max-tool-calls` | 50 | 单次问答的工具调用上限（超了强制收尾） |
 | `plan-model` | deepseek-chat | 规划/复核用的快模型 |
 | `verifier` | true | 是否让模型复核挑刺（关掉只留代码级自检） |
 | `arith-check` | true | 差值/百分比能否用正文数字复现 |

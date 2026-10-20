@@ -63,7 +63,7 @@ public class AnalystAgent {
     private int maxReplans;
 
     /** 单次问答允许的工具调用次数（做在工具入口上，超了强制收尾） */
-    @Value("${app.analyst.max-tool-calls:12}")
+    @Value("${app.analyst.max-tool-calls:50}")
     private int maxToolCalls;
 
     /** 规划与复核用的快模型：这两步不需要深度推理，用 reasoner 纯等 */
