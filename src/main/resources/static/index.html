@@ -188,8 +188,10 @@
       msg = '访问口令不正确或已失效，请用带 code 的完整链接打开';
     } else if (r.status === 404) {
       msg = '接口不存在（HTTP 404）：后端可能是旧版本，请重启服务';
+    } else if (r.status === 200) {
+      msg = '响应不完整（HTTP 200 但内容被切断）：多半是分析耗时过长，被公网网关截断了。请重试一次——服务端通常已算完，重试会直接命中结果缓存。';
     } else {
-      msg = '服务返回了非 JSON 内容（HTTP ' + r.status + '），多半是后端异常或公网链接已过期';
+      msg = '服务返回了非 JSON 内容（HTTP ' + r.status + '）：可能是后端异常或公网链接已过期';
     }
     const err = new Error(msg); err.httpStatus = r.status; throw err;
   }
@@ -206,7 +208,10 @@
         return { r: r, j: await readJson(r) };
       } catch(e) {
         lastErr = e;
-        if (attempt === 0 && !e.httpStatus) { await new Promise(s=>setTimeout(s,1500)); continue; }
+        // HTTP 200 却解析不出 JSON：几乎一定是响应被网关截断了（分析时间过长）。
+        // 服务端其实多半已经算完并写进了结果缓存，此时重试一次通常秒回。
+        const truncated = e.httpStatus === 200;
+        if (attempt === 0 && (truncated || !e.httpStatus)) { await new Promise(s=>setTimeout(s,1200)); continue; }
         throw e;
       }
     }

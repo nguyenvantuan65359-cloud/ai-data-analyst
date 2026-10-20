@@ -79,6 +79,15 @@ public class AnalystAgent {
     private boolean arithCheck;
 
     /**
+     * 单次问答的总时长上限（秒）。
+     * 为什么要有：公网隧道（Cloudflare 免费版）对"源站迟迟不响应"约 100 秒就断，
+     * 断了浏览器只能拿到半截响应，用户看到的就是"服务返回了非 JSON 内容"。
+     * 宁可少做一轮重做，也不要让用户等一个注定被截断的结果。
+     */
+    @Value("${app.analyst.max-seconds:80}")
+    private int maxSeconds;
+
+    /**
      * 数字出处校验的处置方式：
      * off=不查；warn=只提示不重做（默认，先观察误报率）；blocking=打回重做。
      */
@@ -180,6 +189,8 @@ public class AnalystAgent {
         AnalystResult best = null;
         List<String> issues = List.of();
         List<String> suggestions = new java.util.ArrayList<>();
+        boolean skippedRedo = false;
+        long t0 = System.currentTimeMillis();
         int attempts = 0;
 
         for (int round = 0; round <= maxReplans; round++) {
@@ -212,6 +223,15 @@ public class AnalystAgent {
                 issues = List.of();
                 break;
             }
+            long elapsed = (System.currentTimeMillis() - t0) / 1000;
+            if (elapsed >= maxSeconds - 5) {
+                // 再来一轮必然超过网关超时，用户连结果都收不到；
+                // 把问题挂在答案末尾，比"为了完美而丢掉整份结果"划算。
+                issues = found;
+                skippedRedo = true;
+                log.info("单问已用 {} 秒，跳过多余的重做（上限 {} 秒）session={}", elapsed, maxSeconds, sid);
+                break;
+            }
             issues = found;
             log.info("自检第 {} 轮未通过 session={}：{}", attempts, sid, found);
         }
@@ -226,6 +246,10 @@ public class AnalystAgent {
         }
         log.info("数字出处素材 session={} 共 {} 字符，用到工具 {} 个：{}", sid,
                 toolTrace.text().length(), toolTrace.toolsUsed().size(), toolTrace.toolsUsed());
+        if (skippedRedo) {
+            out = appendNote(out, "\n\n（为控制在约 " + maxSeconds + " 秒内返回，本次未再做一轮修正；"
+                    + "上述问题以「自检提示」形式附上，供你判断是否值得重问。）");
+        }
         if (!suggestions.isEmpty()) {
             out = appendNote(out, "\n\n**方法学补充（不影响结论方向，未重做）**：\n- "
                     + String.join("\n- ", suggestions));
