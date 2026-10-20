@@ -100,7 +100,17 @@ public class AnalysisSession {
     public DataTable get() { return resolve(DEFAULT_SID); }
     public void clear() { clear(DEFAULT_SID); }
 
+    /**
+     * 会话 key 统一走 safeSid。
+     *
+     * 之前这里是原样返回，于是埋了个雷：Controller 用**原始** sid 调 pin()，
+     * 而工具层经 ToolContext 拿到的是 safeSid(sessionId)，两边 key 不同——
+     * 浏览器生成的会话 id 都是 `s-xxxxxxxx` 这种带连字符的，safeSid 会把它变成 `sxxxxxxxx`，
+     * 工具层永远查不到用户刚钉住的那张表，只能靠"从落盘库恢复"兜底。
+     * 兜底在 upload 之后碰巧能对上（表名同样由 safeSid 生成），但**手写 SQL 的结果集不入库**，
+     * 那种情况下工具会报"当前会话还没有数据表"。
+     */
     private static String norm(String sid) {
-        return (sid == null || sid.isBlank()) ? DEFAULT_SID : sid;
+        return DataIngestion.safeSid(sid);
     }
 }
