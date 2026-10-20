@@ -18,8 +18,13 @@ import java.util.regex.Pattern;
  */
 public final class GroundingCheck {
 
-    /** 只查三位数以上：百分比、月份、编号这类小数噪音太大 */
-    private static final Pattern NUM = Pattern.compile("([0-9][0-9,]{2,}(?:\\.[0-9]+)?)");
+    /**
+     * 数字切分：前一个字符不能是数字或小数点，后一个字符不能是数字。
+     * 原来的写法会把 "0.691" 从中间切开、只剩 "691"，于是拿 691 去和 0.690727 比对，
+     * 必然判成"找不到出处"——实测就是这么误报的。
+     */
+    private static final Pattern NUM = Pattern.compile(
+            "(?<![0-9.])([0-9][0-9,]*(?:\\.[0-9]+)?)(?![0-9])");
 
     private GroundingCheck() {
     }
@@ -46,8 +51,9 @@ public final class GroundingCheck {
         }
 
         if (!missing.isEmpty()) {
-            issues.add("以下数字在工具输出、图表取数结果和数据画像里都找不到出处：" + String.join("、", missing)
-                    + "。请用 SQL 或工具取得这些数字后再引用；确实是自己算的派生值，请写出算式（例如 18,877 = 140,849 − 121,972）。");
+            issues.add("以下数字在**本轮**工具输出、图表取数结果和数据画像里找不到出处：" + String.join("、", missing)
+                    + "。若来自上一轮对话可忽略（出处校验只覆盖本轮）；若是自己算的派生值，请写出算式"
+                    + "（例如 18,877 = 140,849 − 121,972）；否则请先用 SQL 或工具取得再引用。");
         }
         return issues;
     }
