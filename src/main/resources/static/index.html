@@ -33,6 +33,23 @@
     /* 这次分析没用到用户数据时的醒目横幅：避免"以为在分析自己文件，其实在分析示例库" */
     .datawarn { border:1px solid var(--accent); background:#fdf1f0; color:var(--accent);
                 font-size:13px; line-height:1.6; padding:8px 10px; border-radius:8px; margin-bottom:10px; }
+    /* 数据体检 */
+    .hb-mode { display:inline-block; font-size:12px; padding:1px 9px; border-radius:999px;
+               border:1px solid var(--line); margin-right:6px; }
+    .hb-mode.a { border-color:#1a7f37; color:#1a7f37; }
+    .hb-mode.b { border-color:#b7791f; color:#b7791f; }
+    .hb-head { border-left:3px solid var(--ink); padding:6px 0 6px 12px; margin:12px 0 14px; font-size:14px; }
+    .hb-warn { border:1px solid #e6d3a3; background:#fdf9ee; font-size:13px; padding:8px 10px;
+               border-radius:8px; margin:10px 0; color:#7a5b00; }
+    .finding { border-left:3px solid var(--line); padding:8px 0 8px 12px; margin:12px 0; }
+    .finding.down { border-left-color:var(--accent); }
+    .finding.up { border-left-color:#1a7f37; }
+    .finding.strong { border-left-width:5px; }
+    .finding .fhead { font-weight:600; font-size:14px; }
+    .finding .fmeta { font-weight:400; color:var(--muted); font-size:12px; margin-left:6px; }
+    .finding .fnum { color:var(--ink); font-size:13px; margin-top:3px; font-variant-numeric:tabular-nums; }
+    .finding .fnum b { font-weight:600; }
+    .fb { font-size:13px; margin:6px 0; line-height:1.65; }
     select { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:8px; }
     #chart { width:100%; height:280px; margin-top:12px; }
     /* 多轮对话 */
@@ -131,8 +148,17 @@
       <div id="tableWrap" style="overflow:auto; max-height:260px;"></div>
     </div>
 
+    <div class="card" id="healthCard" style="display:none;">
+      <div class="row" style="justify-content:space-between; margin-bottom:6px;">
+        <h2 style="margin:0;">3. 数据体检（主动扫描，不用提问）</h2>
+        <button class="ghost" id="scanBtn">重新体检</button>
+      </div>
+      <div class="meta" id="healthMeta"></div>
+      <div id="healthBody"></div>
+    </div>
+
     <div class="card">
-      <h2>3. 多轮对话分析</h2>
+      <h2>4. 多轮对话分析</h2>
       <div class="row" style="margin-bottom:8px;">
         <span class="meta" id="sessMeta"></span>
         <button class="ghost" id="histBtn">分析卡片</button>
@@ -219,6 +245,7 @@
   }
 
   // ---------- 数据源 + 数据字典 ----------
+  document.getElementById('scanBtn').addEventListener('click', runScan);
   function refreshSess(){ document.getElementById('sessMeta').textContent = '会话 ' + SESSION_ID; }
   async function loadDbStatus(){
     try {
@@ -297,6 +324,90 @@
     document.getElementById('colB').value = COLUMNS.findIndex((_,i)=>i!==numIdx && isNumCol(i));
     document.getElementById('chartType').value = (distinctCount(numIdx)<=12) ? 'bar' : 'hist';
     renderChart(); renderTable();
+    runScan();   // 体检是毫秒级的纯计算，数据一到位就跑，不等用户提问
+  }
+
+  // ---------- 数据体检 ----------
+  function fmtNum(v){
+    if(v==null || isNaN(v)) return '-';
+    var a = Math.abs(v);
+    if(a>=10000) return v.toLocaleString('zh-CN',{maximumFractionDigits:0});
+    if(a>=100) return v.toLocaleString('zh-CN',{maximumFractionDigits:1});
+    return v.toLocaleString('zh-CN',{maximumFractionDigits:2});
+  }
+  function fmtPct(v){ return (v==null || isNaN(v)) ? '-' : (v>0?'+':'') + v.toFixed(1) + '%'; }
+  // 从落盘库恢复后列名会被物化成大写、保留字还会加前缀下划线（month → _MONTH）。
+  // 展示时还原成人看得懂的样子，不动库里真实的列名。
+  function colName(c){ return (c||'').replace(/^_+/, '').toLowerCase(); }
+
+  async function runScan(){
+    document.getElementById('healthCard').style.display = 'block';
+    var meta = document.getElementById('healthMeta');
+    var body = document.getElementById('healthBody');
+    meta.textContent = '扫描中…';
+    body.innerHTML = '';
+    try {
+      var r = await fetch('/api/analyst/scan', { method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sessionId: SESSION_ID }) });
+      renderScan(await readJson(r));
+    } catch(e) {
+      meta.textContent = '体检失败：' + e.message;
+    }
+  }
+
+  function renderScan(d){
+    var meta = document.getElementById('healthMeta');
+    meta.innerHTML = '<span class="hb-mode ' + (d.mode==='A'?'a':'b') + '">' + esc(d.modeLabel) + '</span>'
+      + '主指标 <b>' + esc(colName(d.metric)||'-') + '</b>'
+      + (d.timeCol ? '　时间列 <b>' + esc(colName(d.timeCol)) + '</b>（' + d.periodCount + ' 期）' : '　无时间列')
+      + '　扫描 ' + d.slicesScanned + ' 个切片　' + d.elapsedMs + ' ms';
+
+    var h = '<div class="hb-head">' + md(d.headline||'') + '</div>';
+
+    if(d.quality && d.quality.length){
+      h += '<div class="hb-warn"><b>数据质量</b>：' + d.quality.map(esc).join('；') + '</div>';
+    }
+
+    if(!d.findings || !d.findings.length){
+      h += '<div class="meta">没有满足判据的发现（判据＝偏离基线 × 超过噪声 × 有业务体量 × 样本够）。</div>';
+    } else {
+      d.findings.forEach(function(f, i){
+        var up = (f.kind||'').indexOf('增长') >= 0;
+        h += '<div class="finding ' + (up?'up':'down') + (f.strength==='强'?' strong':'') + '">'
+          + '<div class="fhead">' + (i+1) + '. ' + esc(f.slice) + ' · ' + esc(f.kind)
+          + '<span class="fmeta">' + esc(colName(f.metric)) + '｜按 '
+          + esc((f.dim||'').split('×').map(colName).join(' × ')) + '｜强度 ' + esc(f.strength) + '</span></div>'
+          + '<div class="fnum">' + (d.mode === 'B'
+              // 横截面模式没有时间基线，说"环比"就是误导：这里只讲相对同类的偏离
+              ? '实际 <b>' + fmtNum(f.last) + '</b>　同类期望 <b>' + fmtNum(f.prev) + '</b>'
+                + '　O/E <b>' + (f.oe||0).toFixed(2) + '</b>'
+                + '　偏离贡献 <b>' + fmtPct(f.sharePct) + '</b>　n=' + f.n
+              : '环比 <b>' + fmtPct(f.pct) + '</b>（' + fmtNum(f.prev) + ' → ' + fmtNum(f.last) + '）'
+                + '　3 期超额 <b>' + fmtNum(f.excess3) + '</b>'
+                + '　稳健 z <b>' + (f.z||0).toFixed(2) + '</b>'
+                + '　对整体贡献 <b>' + fmtPct(f.sharePct) + '</b>　n=' + f.n)
+          + '</div>'
+          + '<details class="sqlbox"><summary>判据 · 反向检验 · 取数 SQL</summary>'
+          + '<div class="fb">' + md(f.why||'') + '</div>'
+          + '<div class="fb"><b>反向检验</b>：' + esc(f.peer||'未做') + '</div>'
+          + '<pre class="dict">' + esc(f.evidence||'') + '</pre></details>'
+          + '</div>';
+      });
+    }
+
+    if(d.blocked && d.blocked.length){
+      h += '<details class="sqlbox"><summary>被拦下 ' + d.blocked.length
+        + ' 条（这些看着惊人，但不该报）</summary>';
+      d.blocked.forEach(function(f){
+        h += '<div class="fb">' + esc(f.slice) + '｜' + esc(f.metric) + '：' + esc(f.why) + '</div>';
+      });
+      h += '</details>';
+    }
+
+    if(d.notes && d.notes.length){
+      h += '<div class="meta">' + d.notes.map(esc).join('；') + '</div>';
+    }
+    document.getElementById('healthBody').innerHTML = h;
   }
 
   function renderTable(){

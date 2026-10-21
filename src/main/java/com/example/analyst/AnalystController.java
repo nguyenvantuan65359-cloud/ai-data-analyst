@@ -25,11 +25,12 @@ public class AnalystController {
     private final ChatSessions chatSessions;
     private final BusinessRules rules;
     private final AnalysisCards cards;
+    private final DiscoveryEngine discovery;
 
     public AnalystController(DataIngestion ingestion, AnalysisSession session,
                             AnalystAgent agent, SqlGuard guard, ExternalDb externalDb,
                             DbProfile dbProfile, ChatSessions chatSessions,
-                            BusinessRules rules, AnalysisCards cards) {
+                            BusinessRules rules, AnalysisCards cards, DiscoveryEngine discovery) {
         this.ingestion = ingestion;
         this.session = session;
         this.agent = agent;
@@ -39,6 +40,26 @@ public class AnalystController {
         this.chatSessions = chatSessions;
         this.rules = rules;
         this.cards = cards;
+        this.discovery = discovery;
+    }
+
+    /**
+     * 一键体检：主动扫描，不等用户提问。
+     * 纯 Java 计算（毫秒级），不调模型——所以它可以在页面加载后立刻跑，
+     * 也可以在以后做成定时任务每天推一份。
+     */
+    @PostMapping("/scan")
+    public ScanReport scan(@RequestBody(required = false) Map<String, String> body) {
+        String sid = body == null ? null : body.get("sessionId");
+        DataTable t = session.resolve(sid);
+        if (t == null || t.rowCount() == 0) {
+            throw new IllegalArgumentException("当前会话没有可分析的数据：请先上传文件或执行一段 SQL");
+        }
+        ScanReport r = discovery.scan(t);
+        log.info("体检 session={} rows={} cols={} 模式={} 发现={} 拦截={} 切片={} 耗时={}ms",
+                sid, t.rowCount(), t.colCount(), r.mode, r.findings.size(), r.blocked.size(),
+                r.slicesScanned, r.elapsedMs);
+        return r;
     }
 
     // ---------- 外部数据源配置 ----------
