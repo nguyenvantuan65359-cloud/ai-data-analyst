@@ -54,6 +54,12 @@
                background:#fcfcfc; border-radius:6px; padding:8px 12px; margin:12px 0;
                font-size:13px; line-height:1.7; }
     .fnarr { margin-top:6px; padding-left:2px; }
+    /* 统计状态：没有这一档，"异常"这个词就是不严谨的 */
+    .tstat { display:inline-block; font-size:11px; padding:0 7px; border-radius:999px;
+             border:1px solid var(--line); margin-left:6px; vertical-align:1px; font-weight:400; }
+    .tstat.sig { border-color:#1a7f37; color:#1a7f37; background:#f2faf4; }
+    .tstat.nosig { border-color:#b7791f; color:#b7791f; background:#fdf9ee; }
+    .tstat.na { border-color:var(--line); color:var(--muted); }
     .fnarr .fb { color:#333; }
     .fnarr .fb b { color:var(--muted); font-weight:600; }
     select { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:8px; }
@@ -412,6 +418,8 @@
         var up = (f.kind||'').indexOf('增长') >= 0;
         h += '<div class="finding ' + (up?'up':'down') + (f.strength==='强'?' strong':'') + '">'
           + '<div class="fhead">' + (i+1) + '. ' + esc(f.slice) + ' · ' + esc(f.kind)
+          + '<span class="tstat ' + (f.testStatus==='显著'?'sig':(f.testStatus==='未显著'?'nosig':'na')) + '">'
+          + esc(f.testStatus || '-') + '</span>'
           + '<span class="fmeta">' + esc(colName(f.metric)) + '｜按 '
           + esc((f.dim||'').split('×').map(colName).join(' × ')) + '｜强度 ' + esc(f.strength) + '</span></div>'
           + '<div class="fnum">' + (d.mode === 'B'
@@ -423,6 +431,10 @@
                 + '　3 期超额 <b>' + fmtNum(f.excess3) + '</b>'
                 + '　稳健 z <b>' + (f.z||0).toFixed(2) + '</b>'
                 + '　对整体贡献 <b>' + fmtPct(f.sharePct) + '</b>　n=' + f.n)
+          + (f.testStatus && f.testStatus !== '不可检验'
+              ? '　p=<b>' + ((f.pValue||0) < 0.0001 ? '<0.0001' : (f.pValue||0).toFixed(4)) + '</b>'
+                + '　q=<b>' + ((f.qValue||0) < 0.001 ? '<0.001' : (f.qValue||0).toFixed(3)) + '</b>'
+              : '　<span class="meta">样本不足，未做检验</span>')
           + '</div>'
           + '<details class="sqlbox"><summary>判据 · 反向检验 · 取数 SQL</summary>'
           + '<div class="fb">' + md(f.why||'') + '</div>'

@@ -72,6 +72,11 @@ public class FindingNarrator {
                 4. what ≤ 60 字：这条发现意味着什么，用人话说，不要重复数字。
                    check ≤ 50 字：下一步查什么，要具体到一个可执行的动作或一张要看的表。
                 5. 语气克制。不确定就说"样本不足，只能当线索"。
+                5b. **统计状态决定措辞强度，不能越权**：
+                    - 「显著」：可以说"确已变化"；
+                    - 「未显著」：只能说"变化大但未达统计显著"，**不许说"异常""恶化""明显下滑"**；
+                    - 「不可检验」：只能说"样本不足，只作描述"，**不许暗示它是异常**。
+                    给到你的 p、q 值必须原样引用，不许改口径（q 是校正后的，比 p 更保守）。
                 6. 若模式是「横截面」，**一个趋势词都不许出现**：上涨、下滑、增长、下降、走高、走低、
                    环比、同比、回暖、萎缩——**包括"不能读作增长"这类否定用法也别写**，
                    因为读者眼里只会留下"增长"两个字。要表达就用「高于同类期望 / 低于同类期望 / 偏离多少」。
@@ -165,6 +170,12 @@ public class FindingNarrator {
                         n(f.last), n(f.prev), f.pct, n(f.excess3), f.z, f.sharePct));
             }
             sb.append("；样本n=").append(f.n);
+            sb.append("；统计状态=").append(f.testStatus);
+            if (!"不可检验".equals(f.testStatus)) {
+                sb.append(String.format("（%s，p=%.4f，q=%.3f）", f.testMethod, f.pValue, f.qValue));
+            } else {
+                sb.append("（").append(f.skipReason).append("）");
+            }
             if (f.reliability < 1) sb.append("；**样本不足，只能当线索**");
             if (f.peer != null && !f.peer.isBlank()) sb.append("；反向检验=").append(f.peer);
             sb.append('\n');
@@ -182,7 +193,9 @@ public class FindingNarrator {
               .append(f.delta).append(' ').append(f.pct).append(' ')
               .append(f.excess).append(' ').append(f.excess3).append(' ')
               .append(f.z).append(' ').append(f.sharePct).append(' ')
-              .append(f.oe).append(' ').append(f.n).append(' ');
+              .append(f.oe).append(' ').append(f.n).append(' ')
+              .append(f.pValue).append(' ').append(f.qValue).append(' ')
+              .append(f.pValue * 100).append(' ').append(f.qValue * 100).append(' ');
         }
         return sb.toString();
     }

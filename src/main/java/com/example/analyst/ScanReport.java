@@ -67,6 +67,22 @@ public class ScanReport {
         public double reliability = 1.0;
         /** 反向检验：同期同类切片是否同向变化 */
         public String peer;
+        /**
+         * 统计状态，三档：
+         * 显著 / 未显著 / 不可检验。
+         * **没有这一档，"异常"两个字就是不严谨的**——稳健 z 大不等于显著。
+         */
+        public String testStatus;
+        public String testMethod;
+        public double pValue;
+        /** BH 校正后的 q 值（控制假发现率）。这才是能对外说"显著"的依据 */
+        public double qValue;
+        /** 不可检验时的原因 */
+        public String skipReason;
+
+        /** 内部用：被体量门槛过滤掉的条目，仍参与 FDR 校正的总体。不序列化 */
+        public transient boolean filtered;
+
         /** 可复现这条结论的 SQL */
         public String evidence;
         /** 判据说明，例如"3 期累计 −18.7%，稳健 z=−3.4" */

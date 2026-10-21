@@ -54,7 +54,9 @@ const checks = [
   ['被拦折叠', d.blocked.length ? out.indexOf('被拦下') >= 0 : true],
   ['质量提醒', d.quality.length ? out.indexOf('数据质量') >= 0 : true],
   ['解读占位', (out.match(/data-note="/g) || []).length === d.findings.length],
-  ['解读容器', out.indexOf('id="narrSum"') >= 0]
+  ['解读容器', out.indexOf('id="narrSum"') >= 0],
+  ['统计徽章', (out.match(/class="tstat /g) || []).length === d.findings.length],
+  ['p/q 或未检验说明', d.findings.every(f => f.testStatus === '不可检验' ? out.indexOf('样本不足，未做检验') >= 0 : out.indexOf('q=') >= 0)]
 ];
 checks.forEach(([k, ok]) => { console.log((ok ? '  ✅ ' : '  ❌ ') + k); if (!ok) bad++; });
 

@@ -117,11 +117,17 @@ public class DiscoveryEngine {
         }
 
         rep.slicesScanned = scanned;
-        rep.totalCandidates = all.size();
-        all.sort((x, y) -> Double.compare(weight(y), weight(x)));
-        rep.findings = all.size() > TOP_N ? new ArrayList<>(all.subList(0, TOP_N)) : all;
+        // 先做 BH 校正（m = 真实检验次数），再筛掉体量不足/平稳的——
+        // 顺序反过来就变成"只对挑出来的那几条校正"，等于没校正。
+        applyFdr(all);
+        List<ScanReport.Finding> cand = new ArrayList<>();
+        for (ScanReport.Finding f : all) if (!f.filtered) cand.add(f);
+        rep.totalCandidates = cand.size();
+        cand.sort((x, y) -> Double.compare(weight(y), weight(x)));
+        rep.findings = cand.size() > TOP_N ? new ArrayList<>(cand.subList(0, TOP_N)) : cand;
 
-        // 反向检验：只用我们自己的数据，不问外部
+        // 反向检验：只用我们自己的数据，不问外部。参照集用全部切片（含被过滤的），
+        // 因为"同期其他切片变没变"要看全貌，不是只看被报出来的那几条。
         for (ScanReport.Finding f : rep.findings) {
             f.peer = peerCheck(f, all);
         }
@@ -206,8 +212,10 @@ public class DiscoveryEngine {
                 continue;
             }
 
-            // 闸门二：体量门槛。贡献不到整体 1% 的切片，报上去只会淹没真信号
-            if (Math.abs(share) < MIN_SHARE_PCT) continue;
+            // 闸门二：体量门槛。贡献不到整体 1% 的切片，报上去只会淹没真信号。
+            // 注意这里不 continue：它仍要做检验、仍要计入 FDR 的总体，
+            // 否则"只对挑出来的做校正"，校正就失去意义了。
+            boolean tooSmall = Math.abs(share) < MIN_SHARE_PCT;
 
             // 主信号：3 期累计 vs 最近一期，取量级更大的那个来说话。
             // 不这么做就会出现"3 期在涨、最近一期在跌"被写成单边结论的情况。
@@ -218,8 +226,15 @@ public class DiscoveryEngine {
             // 不加这一步，候选数会等于切片总数，判据就只排序不筛选，等于没判。
             double scale = Math.abs(vLast) < 1e-9 ? 1 : Math.abs(vLast);
             boolean flat = Math.abs(f.pct) < 5 && Math.abs(z) < 1.5 && Math.abs(main) < 0.1 * scale;
-            if (flat) continue;
 
+            // 显著性检验：本期 vs 前 3 期。**p 值这里只算出来，判"显著"要等 BH 校正之后**
+            Significance.Result sig = testTime(a, e.getKey(), last, ratio);
+            f.pValue = sig.ok ? sig.p : 0;
+            f.testMethod = sig.method;
+            f.skipReason = sig.ok ? "" : sig.reason;
+            f.testStatus = sig.ok ? "未显著" : "不可检验";   // 先给保守值，BH 后再升级
+
+            f.filtered = tooSmall || flat;
             f.kind = (main >= 0 ? "增长" : "下滑") + (useCum ? "（3 期累计）" : "（最近一期）");
 
             // 样本可信度影响排名，而不只是写进提醒。
@@ -233,6 +248,79 @@ public class DiscoveryEngine {
             out.add(f);
         }
         return dedupe(out);
+    }
+
+    /** 时间模式检验：最近一期 vs 前 3 期（不把更早的拉进来，避免趋势把参照组拉平） */
+    private static Significance.Result testTime(Agg a, String key, int last, boolean ratio) {
+        List<List<double[]>> per = a.cellRows.get(key);
+        if (per == null || per.size() <= last) return Significance.Result.skip("没有行级数据，无法检验");
+        List<double[]> target = per.get(last);
+        List<double[]> ref = new ArrayList<>();
+        for (int i = Math.max(0, last - 3); i < last; i++) ref.addAll(per.get(i));
+        if (ratio) {
+            return Significance.ratioPermutation(target, ref, "最近一期 vs 前 3 期");
+        }
+        return Significance.welch(flat(target), flat(ref), "最近一期 vs 前 3 期");
+    }
+
+    /** 把检验结论写成一句话，附在判据后面 */
+    private static String testText(ScanReport.Finding f) {
+        if ("不可检验".equals(f.testStatus)) {
+            return "**未做显著性检验**：" + f.skipReason + "，只能当描述性偏离读";
+        }
+        return String.format("%s p=%.4f，BH 校正后 q=%.3f → %s",
+                f.testMethod, f.pValue, f.qValue, "统计显著".equals(f.testStatus) ? "统计显著" : "未达显著");
+    }
+
+    private static double[] toPrimitive(List<Double> in) {
+        double[] out = new double[in.size()];
+        for (int i = 0; i < in.size(); i++) out[i] = in.get(i);
+        return out;
+    }
+
+    private static double[] flat(List<double[]> rows) {
+        double[] out = new double[rows.size()];
+        for (int i = 0; i < rows.size(); i++) out[i] = rows.get(i)[0];
+        return out;
+    }
+
+    /**
+     * BH 校正 + 定状态。
+     * 只对"做过检验"的切片校正（含被体量/平稳过滤掉的），
+     * 这样 m 是真实的检验次数，而不是"被挑出来的那几条"。
+     */
+    private static void applyFdr(List<ScanReport.Finding> all) {
+        // 没做成检验的，强度不许是"强"——"强"这个字必须有统计依据撑着
+        for (ScanReport.Finding f : all) {
+            if ("不可检验".equals(f.testStatus) && "强".equals(f.strength)) f.strength = "中";
+            if ("不可检验".equals(f.testStatus)) f.why = f.why + "；" + testText(f);
+        }
+        List<ScanReport.Finding> tested = new ArrayList<>();
+        for (ScanReport.Finding f : all) if (f.pValue > 0) tested.add(f);
+        if (tested.isEmpty()) return;
+
+        double[] ps = new double[tested.size()];
+        for (int i = 0; i < tested.size(); i++) ps[i] = tested.get(i).pValue;
+        double[] qs = Significance.bh(ps);
+
+        for (int i = 0; i < tested.size(); i++) {
+            ScanReport.Finding f = tested.get(i);
+            f.qValue = round2(qs[i]);
+            // q<0.1：这一批报出去的里预计不到 10% 是假的。行业常用 0.1（发现导向）
+            f.testStatus = qs[i] < 0.1 ? "显著" : "未显著";
+            // 强度与统计证据必须一致。之前出现过荒谬情况：
+            // 唯一通过 FDR 的发现（p=0.0004）因为 |z| 小被标成"弱"，
+            // 而几条远不显著的却因为体量大标"强"——这等于把最可信的那条排到最后。
+            if ("显著".equals(f.testStatus)) {
+                f.strength = "强";
+            } else if ("强".equals(f.strength)) {
+                f.strength = "中";
+            }
+            // 描述性判据（judgeTime 里已生成）后面追加统计结论，不要覆盖——
+            // 覆盖会丢掉 3 期累计那段，等于把"为什么报它"抹掉了
+            f.why = f.why + "；" + testText(f);
+
+        }
     }
 
     private static String blockReason(Agg a, String key, int last, boolean ratio, double delta, double vPrev) {
@@ -392,6 +480,9 @@ public class DiscoveryEngine {
             int groupBy = combo.size() >= 2 ? 0 : -1;
             Map<String, double[]> agg = new LinkedHashMap<>();   // key -> [sum, n]
             Map<String, String> parent = new HashMap<>();
+            // 横截面检验要拿"这个切片"和"同父组其他切片"的实际行做两组比较，
+            // 所以行级值必须留：parent -> child -> 行值
+            Map<String, Map<String, List<Double>>> rowsById = new LinkedHashMap<>();
             for (int r = 0; r < t.rowCount(); r++) {
                 Double v = SchemaSkeleton.toNum(t.get(r, t.columns.indexOf(primary)));
                 if (v == null) continue;
@@ -401,7 +492,10 @@ public class DiscoveryEngine {
                 double[] cell = agg.computeIfAbsent(key, k -> new double[2]);
                 cell[0] += v;
                 cell[1] += 1;
-                if (groupBy >= 0) parent.put(key, parts.get(groupBy));
+                String gk = groupBy >= 0 ? parts.get(groupBy) : "_";
+                if (groupBy >= 0) parent.put(key, gk);
+                rowsById.computeIfAbsent(gk, k -> new LinkedHashMap<>())
+                        .computeIfAbsent(key, k -> new ArrayList<>()).add(v);
             }
             scanned += agg.size();
 
@@ -447,8 +541,22 @@ public class DiscoveryEngine {
                 }
                 // 金额是连续量、方差远大于泊松，用 (v-exp)/sqrt(exp) 会算出 z=465 这种荒谬值。
                 // 横截面模式只主张"相对同类偏离"，所以判据用 O/E 比，不做显著性宣称。
-                if (Math.abs(f.oe - 1) < MIN_OE_DEVIATION) continue;
-                if (Math.abs(f.sharePct) < MIN_CROSS_SHARE_PCT) continue;
+                boolean weak = Math.abs(f.oe - 1) < MIN_OE_DEVIATION
+                        || Math.abs(f.sharePct) < MIN_CROSS_SHARE_PCT;
+
+                // 横截面检验：本切片的行 vs 同父组其他切片的行（Welch t）
+                List<Double> mine = rowsById.getOrDefault(g, Map.of()).getOrDefault(e.getKey(), List.of());
+                List<Double> ref = new ArrayList<>();
+                for (Map.Entry<String, List<Double>> other : rowsById.getOrDefault(g, Map.of()).entrySet()) {
+                    if (!other.getKey().equals(e.getKey())) ref.addAll(other.getValue());
+                }
+                Significance.Result sig = Significance.welch(toPrimitive(mine), toPrimitive(ref),
+                        "本切片 vs 同组其他切片");
+                f.pValue = sig.ok ? sig.p : 0;
+                f.testMethod = sig.method;
+                f.skipReason = sig.ok ? "" : sig.reason;
+                f.testStatus = sig.ok ? "未显著" : "不可检验";
+                f.filtered = weak;
 
                 f.kind = v > exp ? "效率偏高" : "效率偏低";
                 f.strength = Math.abs(f.oe - 1) >= 0.5 && Math.abs(f.sharePct) >= 6 ? "强" : "中";
@@ -461,13 +569,16 @@ public class DiscoveryEngine {
         }
 
         rep.slicesScanned = scanned;
-        rep.totalCandidates = all.size();
-        all.sort((x, y) -> Double.compare(Math.abs(y.oe - 1) * Math.abs(y.sharePct),
-                                         Math.abs(x.oe - 1) * Math.abs(x.sharePct)));
-        rep.findings = all.size() > TOP_N ? new ArrayList<>(all.subList(0, TOP_N)) : all;
+        applyFdr(all);
+        List<ScanReport.Finding> cand = new ArrayList<>();
+        for (ScanReport.Finding f : all) if (!f.filtered) cand.add(f);
+        rep.totalCandidates = cand.size();
+        cand.sort((x, y) -> Double.compare(Math.abs(y.oe - 1) * Math.abs(y.sharePct),
+                                          Math.abs(x.oe - 1) * Math.abs(x.sharePct)));
+        rep.findings = cand.size() > TOP_N ? new ArrayList<>(cand.subList(0, TOP_N)) : cand;
 
-        if (!all.isEmpty()) {
-            ScanReport.Finding top = all.get(0);
+        if (!rep.findings.isEmpty()) {
+            ScanReport.Finding top = rep.findings.get(0);
             rep.headline = "相对同类偏离最大的是「" + top.slice + "」：实际 " + fmt(top.last)
                     + "，期望 " + fmt(top.prev) + "，O/E = " + String.format("%.2f", top.last / top.prev)
                     + "。**这是横截面偏离，不是增长或下滑。**";
@@ -495,6 +606,12 @@ public class DiscoveryEngine {
         Map<String, double[]> values = new LinkedHashMap<>();
         /** 分母：比率指标=数量合计，普通指标=行数 */
         Map<String, double[]> denom = new LinkedHashMap<>();
+        /**
+         * 行级值：切片 → 每期 → 该期的每一行。
+         * 检验必须用行级值，聚合后的值没有组内方差，什么都检验不了。
+         * 比率指标存成 {分子, 分母} 对，置换检验要用。
+         */
+        Map<String, List<List<double[]>>> cellRows = new LinkedHashMap<>();
         int slices;
         boolean ratio;
 
@@ -546,6 +663,7 @@ public class DiscoveryEngine {
         for (int i = 0; i < a.periods.size(); i++) idx.put(a.periods.get(i), i);
 
         int np = a.periods.size();
+        final int npf = np;
         for (int r = 0; r < t.rowCount(); r++) {
             Integer p = SchemaSkeleton.parsePeriod(t.get(r, timeIdx));
             if (p == null) continue;
@@ -557,16 +675,25 @@ public class DiscoveryEngine {
             String key = String.join("×", parts);
             int pi = idx.get(p);
 
-            double[] raw = a.raw.computeIfAbsent(key, k -> new double[np]);
-            double[] den = a.denom.computeIfAbsent(key, k -> new double[np]);
+            double[] raw = a.raw.computeIfAbsent(key, k -> new double[npf]);
+            double[] den = a.denom.computeIfAbsent(key, k -> new double[npf]);
             raw[pi] += v;
 
+            Double q = null;
             if (ratio) {
-                Double q = denIdx >= 0 ? SchemaSkeleton.toNum(t.get(r, denIdx)) : null;
+                q = denIdx >= 0 ? SchemaSkeleton.toNum(t.get(r, denIdx)) : null;
                 den[pi] += q == null ? 0 : q;
             } else {
                 den[pi] += 1;   // 普通指标的"分母"就是行数，横截面判定要用
             }
+
+            // 行级值：检验的唯一原料
+            List<List<double[]>> perPeriod = a.cellRows.computeIfAbsent(key, k -> {
+                List<List<double[]>> x = new ArrayList<>();
+                for (int i = 0; i < npf; i++) x.add(new ArrayList<>());
+                return x;
+            });
+            perPeriod.get(pi).add(ratio ? new double[]{v, q == null ? 0 : q} : new double[]{v});
         }
         if (a.raw.size() > MAX_SLICES) return null;
         a.slices = a.raw.size();
@@ -648,14 +775,21 @@ public class DiscoveryEngine {
             return "扫描了 " + rep.slicesScanned + " 个切片，没有一个同时满足「偏离基线 + 超过噪声 + 有业务体量」，"
                     + "这份数据在最近一期是平稳的";
         }
-        ScanReport.Finding top = all.get(0);
+        ScanReport.Finding top = rep.findings.isEmpty() ? all.get(0) : rep.findings.get(0);
         StringBuilder sb = new StringBuilder();
-        sb.append(String.format("整体环比 %+.1f%%（Δ=%s）。最值得看的是「%s」（%s）：%s %+.1f%%，"
-                        + "剥离大盘增速后仍有 %s 的净变化。",
-                rep.growth * 100, fmt(rep.totalDelta), top.slice, top.metric, top.kind, top.pct, fmt(top.excess3 != 0 ? top.excess3 : top.excess)));
-        long down = all.stream().filter(x -> x.excess3 < 0 || (x.excess3 == 0 && x.delta < 0)).count();
-        sb.append(String.format("共 %d 条候选（已按「量级 × 异常程度」排序，此处展示前 %d 条），其中 %d 条走低、%d 条走高。",
-                all.size(), rep.findings.size(), down, all.size() - down));
+        // kind 说"3 期累计"时就不能再配单期环比的百分比——"下滑（3 期累计）+1.2%" 是自相矛盾的
+        String signal = top.kind.contains("3 期")
+                ? String.format("剥离大盘增速后的 3 期净变化 %s", fmt(top.excess3))
+                : String.format("环比 %+.1f%%，超额 %s", top.pct, fmt(top.excess));
+        sb.append(String.format("整体环比 %+.1f%%（Δ=%s）。最值得看的是「%s」（%s）：%s，%s。",
+                rep.growth * 100, fmt(rep.totalDelta), top.slice, top.metric, top.kind, signal));
+        long down = all.stream().filter(x -> !x.filtered && (x.excess3 < 0 || (x.excess3 == 0 && x.delta < 0))).count();
+        long cand = all.stream().filter(x -> !x.filtered).count();
+        long sig = all.stream().filter(x -> !x.filtered && "显著".equals(x.testStatus)).count();
+        long untested = all.stream().filter(x -> !x.filtered && "不可检验".equals(x.testStatus)).count();
+        sb.append(String.format("共 %d 条候选（展示前 %d 条），%d 条走低、%d 条走高；"
+                        + "其中 %d 条通过 BH-FDR 校正（q<0.1），%d 条因样本不足无法检验。",
+                cand, rep.findings.size(), down, cand - down, sig, untested));
         return sb.toString();
     }
 
