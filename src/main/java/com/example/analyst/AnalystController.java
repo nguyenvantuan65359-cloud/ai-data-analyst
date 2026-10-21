@@ -26,11 +26,13 @@ public class AnalystController {
     private final BusinessRules rules;
     private final AnalysisCards cards;
     private final DiscoveryEngine discovery;
+    private final FindingNarrator narrator;
 
     public AnalystController(DataIngestion ingestion, AnalysisSession session,
                             AnalystAgent agent, SqlGuard guard, ExternalDb externalDb,
                             DbProfile dbProfile, ChatSessions chatSessions,
-                            BusinessRules rules, AnalysisCards cards, DiscoveryEngine discovery) {
+                            BusinessRules rules, AnalysisCards cards, DiscoveryEngine discovery,
+                            FindingNarrator narrator) {
         this.ingestion = ingestion;
         this.session = session;
         this.agent = agent;
@@ -41,6 +43,27 @@ public class AnalystController {
         this.rules = rules;
         this.cards = cards;
         this.discovery = discovery;
+        this.narrator = narrator;
+    }
+
+    /**
+     * 体检发现的**解读**（单独一个端点，不拖慢体检本身）。
+     * 体检 12ms 就能出数字，模型解读要 3~8 秒——先让用户看到发现，再补解读，
+     * 不要因为一段文字把整个页面卡住。
+     */
+    @PostMapping("/scan/narrate")
+    public FindingNarrator.Narratives narrate(@RequestBody(required = false) Map<String, String> body) {
+        String sid = body == null ? null : body.get("sessionId");
+        DataTable t = session.resolve(sid);
+        if (t == null || t.rowCount() == 0) {
+            throw new IllegalArgumentException("当前会话没有可分析的数据：请先上传文件或执行一段 SQL");
+        }
+        ScanReport rep = discovery.scan(t);      // 毫秒级，重算一次比让前端回传整个报告更稳
+        long t0 = System.currentTimeMillis();
+        FindingNarrator.Narratives n = narrator.narrate(rep);
+        log.info("体检解读 session={} 发现={} 解读={} 丢弃={} 耗时={}ms",
+                sid, rep.findings.size(), n.notes.size(), n.dropped, System.currentTimeMillis() - t0);
+        return n;
     }
 
     /**

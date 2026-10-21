@@ -59,6 +59,22 @@
 - **样本不足影响排名而不只是提醒**：交叉切片每格每期不到 2 行时降权 0.5，避免"单行对单行"的波动挤掉可靠的单维结论。
 - 报告第一行必须写明模式。**把横截面说成「上涨」是致命误导**，所以它宁可说"不能判断涨跌"。
 
+### 模型解读：只翻译，不算数
+
+`POST /api/analyst/scan` 只出数字（12ms）；`POST /api/analyst/scan/narrate` 才调模型（3~8s）。
+拆开是因为**不该让一段文字把数字卡住**——页面先出发现，解读后补。
+
+护栏靠结构，不只靠提示词：
+
+| 护栏 | 做法 |
+|---|---|
+| 它没有机会自己算 | 只喂已算好的结论（切片、环比、z、O/E、反向检验），**拿不到原始数据** |
+| 它不能编数字 | 解读文本里的数字必须能在报告里找到，找不到整条丢弃 |
+| 它不能编因果 | 提示词禁写"因为/导致"，只能写"需核对…" |
+| 横截面模式不许出现趋势词 | 上涨/下滑/增长/环比…一个都不许，**含"不能读作增长"这类否定用法**（读者只会记住"增长"两个字）；出现即丢 |
+
+丢弃的条目会回报 `dropped` 数量，前端显示"有 N 条解读引用了报告里没有的数字，已丢弃"。**宁可少说，不说没出处的数。**
+
 ## 关键设计（踩过的坑都在这）
 
 1. **只读闸门在代码层，不在提示词里**
@@ -143,6 +159,7 @@ bash tunnel.sh --restart    # 地址变了就重起（机器重启后）
 | POST | `/api/analyst/upload` | 上传文件（multipart，`file` + `sessionId`） |
 | POST | `/api/analyst/sql` | 执行只读 SELECT，结果成为分析对象 |
 | POST | `/api/analyst/scan` | **数据体检**：主动扫描异常与增长点，纯 Java 计算、不调模型，毫秒级 |
+| POST | `/api/analyst/scan/narrate` | 体检发现的模型解读：只翻译已算好的结果，引用报告外数字的条目自动丢弃 |
 | POST | `/api/analyst/ask` | 提问，返回 `answer` + `charts[]` + `dataReady` |
 | GET | `/api/analyst/state` | 本会话有没有已载入的数据 |
 | POST/GET/DELETE | `/api/analyst/db` | 连接 / 查询 / 断开外部库 |
@@ -193,6 +210,7 @@ src/main/java/com/example/analyst/
   SchemaSkeleton.java       骨架识别：时间解构 / 度量 / 维度（四重约束）
   DiscoveryEngine.java      体检引擎：双模式扫描 + 判据 + 反向检验
   ScanReport.java           体检结果（发现 / 拦截 / 质量提醒）
+  FindingNarrator.java      体检解读（只翻译不算数，带数字出处校验）
   ToolBudget.java           单次问答的工具调用预算（ThreadLocal）
   SelfCheck.java            代码级自检（不调模型）
   ArithCheck.java           算术复算：差值/百分比能否用文中数字复现

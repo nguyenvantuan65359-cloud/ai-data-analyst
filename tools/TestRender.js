@@ -52,7 +52,9 @@ const checks = [
   ['取数 SQL', /<pre class="dict">/.test(out)],
   ['反向检验', out.indexOf('反向检验') >= 0],
   ['被拦折叠', d.blocked.length ? out.indexOf('被拦下') >= 0 : true],
-  ['质量提醒', d.quality.length ? out.indexOf('数据质量') >= 0 : true]
+  ['质量提醒', d.quality.length ? out.indexOf('数据质量') >= 0 : true],
+  ['解读占位', (out.match(/data-note="/g) || []).length === d.findings.length],
+  ['解读容器', out.indexOf('id="narrSum"') >= 0]
 ];
 checks.forEach(([k, ok]) => { console.log((ok ? '  ✅ ' : '  ❌ ') + k); if (!ok) bad++; });
 

@@ -50,6 +50,12 @@
     .finding .fnum { color:var(--ink); font-size:13px; margin-top:3px; font-variant-numeric:tabular-nums; }
     .finding .fnum b { font-weight:600; }
     .fb { font-size:13px; margin:6px 0; line-height:1.65; }
+    .hb-narr { border:1px solid var(--line); border-left:3px solid var(--accent);
+               background:#fcfcfc; border-radius:6px; padding:8px 12px; margin:12px 0;
+               font-size:13px; line-height:1.7; }
+    .fnarr { margin-top:6px; padding-left:2px; }
+    .fnarr .fb { color:#333; }
+    .fnarr .fb b { color:var(--muted); font-weight:600; }
     select { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:8px; }
     #chart { width:100%; height:280px; margin-top:12px; }
     /* 多轮对话 */
@@ -154,6 +160,7 @@
         <button class="ghost" id="scanBtn">重新体检</button>
       </div>
       <div class="meta" id="healthMeta"></div>
+      <div class="meta" id="narrTip" style="display:none;"></div>
       <div id="healthBody"></div>
     </div>
 
@@ -350,8 +357,37 @@
       var r = await fetch('/api/analyst/scan', { method:'POST',
         headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sessionId: SESSION_ID }) });
       renderScan(await readJson(r));
+      narrateAsync();     // 数字先出来，解读后补：不让一段文字把整个页面卡住
     } catch(e) {
       meta.textContent = '体检失败：' + e.message;
+    }
+  }
+
+  /**
+   * 模型解读：只翻译、不算数。
+   * 服务端会把引用报告外数字的条目整条丢弃，这里只负责填进去。
+   */
+  async function narrateAsync(){
+    var tip = document.getElementById('narrTip');
+    tip.style.display = '';
+    tip.textContent = '正在生成解读…（模型只翻译已经算好的结果，不参与计算）';
+    try {
+      var r = await fetch('/api/analyst/scan/narrate', { method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sessionId: SESSION_ID }) });
+      var n = await readJson(r);
+      var sum = document.getElementById('narrSum');
+      if(n.summary){ sum.style.display = ''; sum.innerHTML = '<b>解读</b>　' + md(n.summary); }
+      (n.notes || []).forEach(function(x){
+        var el = document.querySelector('.fnarr[data-note="' + x.i + '"]');
+        if(!el) return;
+        el.innerHTML = '<div class="fb"><b>这意味着</b>　' + esc(x.what) + '</div>'
+                     + '<div class="fb"><b>下一步</b>　' + esc(x.check) + '</div>';
+      });
+      tip.textContent = n.dropped
+        ? ('有 ' + n.dropped + ' 条解读引用了报告里没有的数字，已丢弃（宁可少说，不说没出处的数）')
+        : '';
+    } catch(e) {
+      tip.textContent = '解读失败：' + e.message + '　—— 发现本身是算好的，不受影响';
     }
   }
 
@@ -362,7 +398,8 @@
       + (d.timeCol ? '　时间列 <b>' + esc(colName(d.timeCol)) + '</b>（' + d.periodCount + ' 期）' : '　无时间列')
       + '　扫描 ' + d.slicesScanned + ' 个切片　' + d.elapsedMs + ' ms';
 
-    var h = '<div class="hb-head">' + md(d.headline||'') + '</div>';
+    var h = '<div class="hb-head">' + md(d.headline||'') + '</div>'
+          + '<div class="hb-narr" id="narrSum" style="display:none;"></div>';
 
     if(d.quality && d.quality.length){
       h += '<div class="hb-warn"><b>数据质量</b>：' + d.quality.map(esc).join('；') + '</div>';
@@ -391,6 +428,7 @@
           + '<div class="fb">' + md(f.why||'') + '</div>'
           + '<div class="fb"><b>反向检验</b>：' + esc(f.peer||'未做') + '</div>'
           + '<pre class="dict">' + esc(f.evidence||'') + '</pre></details>'
+          + '<div class="fnarr" data-note="' + i + '"></div>'
           + '</div>';
       });
     }
